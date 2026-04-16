@@ -1,0 +1,12 @@
+.env
+.git/
+.gitignore
+.vscode/
+__pycache__/
+*.pyc
+*.pyo
+environment.yml
+requirements-docker.txt
+infra/
+README.md
+*.md
