@@ -110,6 +110,24 @@ streamlit run app.py
 
 The app opens at `http://localhost:8501`.
 
+### 4. Run with Docker (optional)
+
+Build and run the production image locally, using the same `.env` file for API keys:
+
+```bash
+docker build --target runtime -t ebird-llm .
+docker run --rm -p 8501:8501 --env-file .env ebird-llm
+```
+
+Run the test suite inside Docker (uses the same deps as production):
+
+```bash
+docker build --target test -t ebird-llm:test .
+docker run --rm --env-file .env ebird-llm:test
+```
+
+The app opens at `http://localhost:8501`.
+
 ---
 
 ## Model Selection

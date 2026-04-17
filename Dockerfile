@@ -8,8 +8,25 @@ RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir --prefix=/install torch torchvision \
       --index-url https://download.pytorch.org/whl/cpu
 
+# ── Test stage ────────────────────────────────────────────────────────────────
+FROM builder AS test
+
+# Expose the builder's installed packages to Python
+RUN cp -r /install/. /usr/local/
+
+# Install test-only deps directly (no --prefix needed, not going into production)
+COPY requirements-test.txt .
+RUN pip install --no-cache-dir -r requirements-test.txt
+
+WORKDIR /app
+COPY app.py .
+COPY src/ src/
+COPY tests/ tests/
+
+CMD ["python", "-m", "pytest", "tests/", "-v"]
+
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM python:3.11-slim AS runtime
 
 # curl is needed for the HEALTHCHECK
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
