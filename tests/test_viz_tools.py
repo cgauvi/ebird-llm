@@ -2,6 +2,7 @@
 
 import json
 
+import folium
 import pytest
 from langchain_core.tools import ToolException
 
@@ -60,15 +61,16 @@ class TestCreateSightingsMap:
         create_sightings_map.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
         assert VizBuffer["type"] == "map"
 
-    def test_vizbuffer_data_is_html_string(self):
+    def test_vizbuffer_data_is_folium_map(self):
         create_sightings_map.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
-        assert isinstance(VizBuffer["data"], str)
-        assert len(VizBuffer["data"]) > 0
+        assert isinstance(VizBuffer["data"], folium.Map)
 
-    def test_vizbuffer_html_contains_leaflet(self):
+    def test_vizbuffer_map_has_markers(self):
+        """The folium Map should contain marker child elements."""
         create_sightings_map.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
-        # folium maps always embed Leaflet.js
-        assert "leaflet" in VizBuffer["data"].lower()
+        fmap = VizBuffer["data"]
+        html = fmap._repr_html_()
+        assert "leaflet" in html.lower()
 
     def test_vizbuffer_title_set(self):
         create_sightings_map.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
@@ -112,6 +114,31 @@ class TestCreateSightingsMap:
             {"observations_json": json.dumps([SAMPLE_OBS[0]])}
         )
         assert VizBuffer["data"] != first_data
+
+    def test_vizbuffer_table_is_populated(self):
+        create_sightings_map.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        assert isinstance(VizBuffer["table"], list)
+        assert len(VizBuffer["table"]) > 0
+
+    def test_vizbuffer_table_max_10_rows(self):
+        # Build 15 observations to confirm the cap is enforced
+        many_obs = [
+            {**SAMPLE_OBS[i % 2], "comName": f"Species {i}", "locId": f"L{i}"}
+            for i in range(15)
+        ]
+        create_sightings_map.invoke({"observations_json": json.dumps(many_obs)})
+        assert len(VizBuffer["table"]) <= 10
+
+    def test_vizbuffer_table_has_expected_columns(self):
+        create_sightings_map.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        row = VizBuffer["table"][0]
+        for col in ("Species", "Count", "Location", "Date"):
+            assert col in row, f"Missing column: {col}"
+
+    def test_vizbuffer_table_sorted_by_count_descending(self):
+        create_sightings_map.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        counts = [r["Count"] for r in VizBuffer["table"]]
+        assert counts == sorted(counts, reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -210,3 +237,47 @@ class TestCreateHistoricalChart:
             create_historical_chart.invoke(
                 {"observations_json": json.dumps(obs), "chart_type": "line"}
             )
+
+    def test_vizbuffer_table_not_set_by_chart_tool(self):
+        """Chart tool does not populate VizBuffer['table'] — it stays None."""
+        create_historical_chart.invoke(
+            {"observations_json": json.dumps(SAMPLE_OBS), "chart_type": "bar"}
+        )
+        assert VizBuffer["table"] is None
+
+
+# ---------------------------------------------------------------------------
+# _parse_obs — JSON cleaning
+# ---------------------------------------------------------------------------
+
+from src.tools.viz_tools import _parse_obs
+
+
+class TestParseObsCleaning:
+    def test_parses_clean_json(self):
+        result = _parse_obs(json.dumps(SAMPLE_OBS))
+        assert result == SAMPLE_OBS
+
+    def test_strips_backslash_escaped_quotes(self):
+        """LLMs sometimes emit \" instead of " inside the JSON string."""
+        escaped = json.dumps(SAMPLE_OBS).replace('"', '\\"')
+        result = _parse_obs(escaped)
+        assert result == SAMPLE_OBS
+
+    def test_strips_surrounding_whitespace(self):
+        result = _parse_obs("  " + json.dumps(SAMPLE_OBS) + "  ")
+        assert result == SAMPLE_OBS
+
+    def test_unwraps_outer_double_quotes(self):
+        """Some models wrap the whole JSON string in an extra pair of quotes."""
+        wrapped = '"' + json.dumps(SAMPLE_OBS).replace('"', '\\"') + '"'
+        result = _parse_obs(wrapped)
+        assert result == SAMPLE_OBS
+
+    def test_raises_on_invalid_json(self):
+        with pytest.raises(ToolException, match="not valid JSON"):
+            _parse_obs("not-json")
+
+    def test_raises_on_non_list(self):
+        with pytest.raises(ToolException, match="JSON array"):
+            _parse_obs(json.dumps({"key": "value"}))

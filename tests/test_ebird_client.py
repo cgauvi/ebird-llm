@@ -34,6 +34,14 @@ class TestEBirdClientGet:
         mock = MagicMock()
         mock.ok = True
         mock.json.return_value = json_data
+        mock.text = "non-empty"  # non-empty so the empty-body guard is not triggered
+        return mock
+
+    def _empty(self):
+        """Simulate a 200 OK with an empty body (eBird's way of saying 'no results')."""
+        mock = MagicMock()
+        mock.ok = True
+        mock.text = ""
         return mock
 
     def _err(self, status_code=404):
@@ -56,6 +64,20 @@ class TestEBirdClientGet:
         with patch.object(client._session, "get", return_value=self._err(500)):
             with pytest.raises(EBirdError, match="500"):
                 client._get("/data/obs/geo/recent")
+
+    def test_empty_body_returns_empty_list(self, client):
+        """eBird returns HTTP 200 with an empty body when there are no results."""
+        with patch.object(client._session, "get", return_value=self._empty()):
+            result = client._get("/data/obs/geo/recent")
+        assert result == []
+
+    def test_whitespace_only_body_returns_empty_list(self, client):
+        mock = MagicMock()
+        mock.ok = True
+        mock.text = "   "
+        with patch.object(client._session, "get", return_value=mock):
+            result = client._get("/data/obs/geo/recent")
+        assert result == []
 
     # ------------------------------------------------------------------
     # recent_observations_by_location
@@ -157,7 +179,7 @@ class TestEBirdClientGet:
     def test_region_list(self, client):
         regions = [{"code": "US-NY", "name": "New York"}]
         with patch.object(client._session, "get", return_value=self._ok(regions)) as m:
-            result = client.region_list("subnational1", "US")
+            result = client.region_list("US", "subnational1")
         assert result == regions
         url = m.call_args[0][0]
         assert "subnational1/US" in url
