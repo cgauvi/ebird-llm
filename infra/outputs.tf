@@ -65,3 +65,8 @@ output "docker_push_commands" {
       --region ${var.aws_region}
   EOT
 }
+
+output "github_deploy_role_arn" {
+  description = "ARN of the IAM role assumed by GitHub Actions via OIDC — copy into GitHub secret AWS_DEPLOY_ROLE_ARN"
+  value       = aws_iam_role.github_deploy.arn
+}

@@ -1,13 +1,13 @@
 variable "aws_region" {
   description = "AWS region to deploy resources"
   type        = string
-  default     = "us-east-1"
+  default     = "us-east-2"
 }
 
 variable "aws_profile" {
   description = "AWS CLI named profile to use for authentication"
   type        = string
-  default     = "aws_perso_beneva"
+  default     = "default"
 }
 
 variable "project_name" {
@@ -58,6 +58,12 @@ variable "streamlit_port" {
   description = "Port Streamlit listens on inside the container"
   type        = number
   default     = 8501
+}
+
+variable "vpc_cidr" {
+  description = "CIDR block for the VPC (must not overlap between environments in the same account)"
+  type        = string
+  default     = "10.0.0.0/16"
 }
 
 

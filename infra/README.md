@@ -1,9 +1,11 @@
 # eBird LLM — AWS Infrastructure
 
 Terraform code to deploy the Streamlit app on **AWS ECS Fargate** behind a
-public **Application Load Balancer**. API keys are stored as
-**SSM SecureString** parameters and injected at container startup — never in
-plain text in the task definition.
+public **Application Load Balancer**. Two fully isolated environments
+(**dev** and **prod**) are managed from the same Terraform code using separate
+state files and `.tfvars`. API keys are stored as **SSM SecureString**
+parameters and injected at container startup — never in plain text in the task
+definition.
 
 > For local development and app documentation see the [root README](../README.md).
 
@@ -34,7 +36,7 @@ Internet
     eBird API v2
 ```
 
-**Resources created:**
+**Resources created per environment:**
 
 | File | Resources |
 |---|---|
@@ -42,7 +44,12 @@ Internet
 | `ecr_iam.tf` | ECR repository, ECS task execution role, ECS task role, SSM read policy |
 | `ecs.tf` | SSM parameters, CloudWatch log group, ECS cluster, task definition, service |
 | `alb.tf` | ALB, target group, HTTP listener |
-| `outputs.tf` | `app_url`, `set_secrets_commands`, `docker_push_commands` |
+| `oidc.tf` | GitHub Actions OIDC provider, deploy IAM role + policy |
+| `outputs.tf` | `app_url`, `set_secrets_commands`, `docker_push_commands`, `github_deploy_role_arn` |
+
+All resources are namespaced by `ebird-llm-<environment>` (e.g. `ebird-llm-dev`,
+`ebird-llm-prod`). The two environments use non-overlapping VPC CIDRs
+(`10.0.0.0/16` for dev, `10.1.0.0/16` for prod).
 
 ---
 
@@ -54,81 +61,130 @@ Internet
 
 ---
 
-## Deployment
+## First-time Setup (run once)
 
-### 1. Initialise Terraform
+### Step 0 — Create the remote state bucket
+
+The main module uses S3 + DynamoDB for remote state. These resources must exist
+before the first `terraform init`. The `bootstrap/` sub-module creates them
+with local state so they never depend on themselves.
+
+```bash
+cd infra/bootstrap
+terraform init
+terraform apply
+# Outputs: state_bucket_name = "ebird-llm-tf-state-<account_id>"
+```
+
+The bucket name is already filled in `backend-dev.hcl` and `backend-prod.hcl`.
+If you recreate the bootstrap in a different account, update the `bucket` value
+in both files.
+
+### Step 1 — Bootstrap the GitHub OIDC role (enables CI/CD)
+
+The OIDC role in `oidc.tf` allows GitHub Actions to deploy without storing
+long-lived AWS credentials. Apply it once from local credentials before the
+pipeline is active:
 
 ```bash
 cd infra
-terraform init
+terraform init -backend-config=backend-dev.hcl
+terraform apply -var-file=dev.tfvars \
+  -target=aws_iam_openid_connect_provider.github \
+  -target=aws_iam_role.github_deploy \
+  -target=aws_iam_role_policy.github_deploy
 ```
 
-### 2. (Optional) Override defaults
-
-Create a `terraform.tfvars` file:
-
-```hcl
-aws_region    = "us-east-1"
-aws_profile   = "default"
-project_name  = "ebird-llm"
-environment   = "dev"
-task_cpu      = 1024             # 1 vCPU
-task_memory   = 2048             # MiB
-desired_count = 1
+Copy the role ARN into GitHub:
+```bash
+terraform output github_deploy_role_arn
+# → GitHub repo → Settings → Secrets → Actions → New secret: AWS_DEPLOY_ROLE_ARN
 ```
 
-### 3. Create infrastructure + ECR repository
+---
+
+## Manual Deployment
+
+Use this when deploying outside of CI/CD (e.g. first full apply, debugging).
+
+### Dev environment
 
 ```bash
-terraform apply
+cd infra
+terraform init -backend-config=backend-dev.hcl
+terraform apply -var-file=dev.tfvars
 ```
 
-This creates all resources including SSM parameters with `PLACEHOLDER` values.
+### Prod environment
 
-### 4. Set real API key values in SSM
+```bash
+cd infra
+terraform init -backend-config=backend-prod.hcl -reconfigure
+terraform apply -var-file=prod.tfvars
+```
 
-Copy the commands from the Terraform output and run them:
+> Always pass `-reconfigure` when switching between environments to avoid
+> Terraform trying to migrate state between backends.
+
+### Set real API key values in SSM
+
+After the first apply, SSM parameters are created with `PLACEHOLDER` values.
+Populate them before starting the ECS service:
 
 ```bash
 terraform output -raw set_secrets_commands
 ```
 
-Which produces something like:
+Which produces:
 
 ```bash
 aws ssm put-parameter \
   --name "/ebird-llm-dev/EBIRD_API_KEY" \
   --value "<YOUR_EBIRD_API_KEY>" \
-  --type SecureString --overwrite --region us-east-1
+  --type SecureString --overwrite --region us-east-2
 
 aws ssm put-parameter \
   --name "/ebird-llm-dev/HUGGINGFACE_API_TOKEN" \
   --value "<YOUR_HUGGINGFACE_API_TOKEN>" \
-  --type SecureString --overwrite --region us-east-1
+  --type SecureString --overwrite --region us-east-2
 ```
 
 > The `lifecycle { ignore_changes = [value] }` block means Terraform will
-> never revert values you set here.
+> never revert values you set manually.
 
-### 5. Build and push the Docker image
-
-Run the commands from the output (from the **project root**, not `infra/`):
+### Build and push the Docker image (manual)
 
 ```bash
 cd ..
 terraform -chdir=infra output -raw docker_push_commands
 ```
 
-The commands authenticate Docker with ECR, build the image, push it, and
-force a new ECS deployment to pull the latest tag.
+The commands authenticate Docker with ECR, build the `runtime` stage, push it,
+and force a new ECS deployment.
 
-### 6. Access the app
+### Access the app
 
 ```bash
 terraform output app_url
 ```
 
-The Streamlit UI will be available at the printed URL over HTTP on port 80.
+---
+
+## CI/CD (GitHub Actions)
+
+After the OIDC role is bootstrapped (Step 1 above), all deployments are
+automated:
+
+| Branch | Trigger | Deploys to |
+|---|---|---|
+| `develop` | push | `ebird-llm-dev` |
+| `master` | push | `ebird-llm-prod` |
+
+The deploy workflow (`.github/workflows/deploy.yml`) only runs after the
+`Unit Tests` workflow succeeds. It:
+
+1. Builds the `runtime` Docker stage and pushes to ECR tagged with the git SHA
+2. Runs `terraform apply` with the environment-specific `-backend-config` and `-var-file`
 
 ---
 
@@ -136,15 +192,17 @@ The Streamlit UI will be available at the printed URL over HTTP on port 80.
 
 | Variable | Default | Description |
 |---|---|---|
-| `aws_region` | `us-east-1` | AWS region |
-| `aws_profile` | `aws_perso_beneva` | AWS CLI named profile |
+| `aws_region` | `us-east-2` | AWS region |
+| `aws_profile` | `aws_perso_beneva` | AWS CLI named profile (local use only) |
 | `project_name` | `ebird-llm` | Prefix for all resource names |
-| `environment` | `dev` | Deployment environment |
-| `image_tag` | `latest` | ECR image tag to deploy |
+| `environment` | `dev` | Deployment environment — set via `.tfvars` |
+| `vpc_cidr` | `10.0.0.0/16` | VPC CIDR block — must differ between envs |
+| `image_tag` | `latest` | ECR image tag to deploy — overridden by CI with git SHA |
 | `task_cpu` | `1024` | Fargate CPU units (1024 = 1 vCPU) |
 | `task_memory` | `2048` | Fargate memory (MiB) |
 | `desired_count` | `1` | Number of running ECS tasks (set to `0` to pause) |
 | `streamlit_port` | `8501` | Container port Streamlit listens on |
+| `github_repo` | `cgauvi/ebird-llm` | GitHub repo for OIDC trust policy |
 
 ---
 
@@ -152,31 +210,30 @@ The Streamlit UI will be available at the printed URL over HTTP on port 80.
 
 **Pause the app (stop billing for compute):**
 ```bash
-terraform apply -var="desired_count=0"
+terraform apply -var-file=dev.tfvars -var="desired_count=0"
 ```
 
 **Resume:**
 ```bash
-terraform apply -var="desired_count=1"
-```
-
-**Redeploy after a code change:**
-```bash
-# From project root
-docker build -t <ecr_url>:latest .
-docker push <ecr_url>:latest
-aws ecs update-service --cluster ebird-llm-dev --service ebird-llm-dev \
-  --force-new-deployment --region us-east-1
+terraform apply -var-file=dev.tfvars -var="desired_count=1"
 ```
 
 **View logs:**
 ```bash
-aws logs tail /ecs/ebird-llm-dev --follow --region us-east-1
+aws logs tail /ecs/ebird-llm-dev --follow --region us-east-2
+# prod:
+aws logs tail /ecs/ebird-llm-prod --follow --region us-east-2
 ```
 
-**Tear down all resources:**
+**Tear down an environment:**
 ```bash
-terraform destroy
+# Dev
+terraform init -backend-config=backend-dev.hcl -reconfigure
+terraform destroy -var-file=dev.tfvars
+
+# Prod
+terraform init -backend-config=backend-prod.hcl -reconfigure
+terraform destroy -var-file=prod.tfvars
 ```
 
 ---
@@ -190,14 +247,14 @@ terraform destroy
 
 ---
 
-## Cost Estimate (dev defaults)
+## Cost Estimate
 
-| Resource | Approx. monthly cost |
-|---|---|
-| Fargate task (1 vCPU / 2 GB, 24/7) | ~$35 |
-| ALB | ~$18 |
-| ECR storage (1 image ~1 GB) | ~$0.10 |
-| CloudWatch Logs (light traffic) | < $1 |
+| Resource | Dev (512 CPU / 1 GB) | Prod (1 vCPU / 2 GB) |
+|---|---|---|
+| Fargate task (24/7) | ~$9 | ~$35 |
+| ALB | ~$18 | ~$18 |
+| ECR storage (~1 GB) | ~$0.10 | ~$0.10 |
+| CloudWatch Logs | < $1 | < $1 |
 | SSM parameters | Free tier |
 | **Total** | **~$55/month** |
 
