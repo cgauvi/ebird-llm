@@ -20,12 +20,69 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from src.utils.logging_config import setup_logging, LogBuffer, clear_log_buffer, get_log_entries  # noqa: E402
+setup_logging()
+
 st.set_page_config(
     page_title="eBird Birding Assistant",
     page_icon="🐦",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Maximum number of user turns allowed per conversation before requiring a reset.
+MAX_TURNS = 20
+
+# ---------------------------------------------------------------------------
+# Log pane helpers — defined at module level so the streaming loop can reach them
+# ---------------------------------------------------------------------------
+
+_LOG_LEVEL_COLOURS = {
+    "DEBUG":    "#888888",
+    "INFO":     "#0277bd",
+    "WARNING":  "#e65100",
+    "ERROR":    "#c62828",
+    "CRITICAL": "#6a1b9a",
+    "TOOL_IN":  "#2e7d32",
+    "TOOL_OUT": "#558b2f",
+    "LLM_OUT":  "#6a1b9a",
+}
+_LOG_LEVEL_ORDER = {
+    "DEBUG": 0, "INFO": 1, "TOOL_IN": 1, "TOOL_OUT": 1,
+    "LLM_OUT": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4,
+}
+
+
+def _render_log_into(container, all_entries: list, threshold: int) -> None:
+    """Render *all_entries* filtered by *threshold* into a Streamlit container."""
+    filtered = [e for e in all_entries if _LOG_LEVEL_ORDER.get(e["level"], 0) >= threshold]
+    if filtered:
+        rows_html = []
+        for e in filtered:
+            colour = _LOG_LEVEL_COLOURS.get(e["level"], "#ffffff")
+            level_badge = f'<span style="color:{colour};font-weight:bold">[{e["level"]:<8}]</span>'
+            ts_span = f'<span style="color:#78909c">[{e["ts"]}]</span>'
+            msg = (
+                e["message"]
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            rows_html.append(f"{ts_span} {level_badge}<br>{msg}")
+        log_html = (
+            '<div style="'
+            "border:1px solid #e0e0e0;border-radius:6px;padding:10px 12px;"
+            "font-family:monospace;font-size:11px;line-height:1.7;"
+            "max-height:500px;overflow-y:auto;white-space:pre-wrap;"
+            '">' + "<br>".join(rows_html) + "</div>"
+        )
+        container.markdown(log_html, unsafe_allow_html=True)
+    else:
+        container.caption("No entries. Run a query to see output.")
+
+
+log_area = None      # set inside sidebar when show_logs is active
+_log_threshold = 1   # default: INFO
 
 # ---------------------------------------------------------------------------
 # Session state initialisation
@@ -34,15 +91,18 @@ st.set_page_config(
 if "messages" not in st.session_state:
     st.session_state.messages = []  # list[dict(role, content)]
 
+if "show_logs" not in st.session_state:
+    st.session_state.show_logs = False
+
+if "log_entries" not in st.session_state:
+    st.session_state.log_entries = []  # list[dict] — persists across reruns
+
 if "viz_snapshot" not in st.session_state:
     # Snapshot of VizBuffer captured after each agent turn so the right panel
     # persists across re-runs triggered by subsequent chat inputs.
-    st.session_state.viz_snapshot = {"type": None, "data": None, "title": None}
-
-if "selected_model" not in st.session_state:
-    # Initialise from env var (set in .env or by Terraform); fall back to default
+    st.session_state.viz_snapshot = {"type": None, "data": None, "title": None, "table": None}
     from src.config import DEFAULT_MODEL_ALIAS
-    st.session_state.selected_model = os.environ.get("HF_MODEL_ID", DEFAULT_MODEL_ALIAS)
+    os.environ.setdefault("HF_MODEL_ID", DEFAULT_MODEL_ALIAS)
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -54,28 +114,17 @@ with st.sidebar:
 
     st.divider()
 
-    # Environment status
-    st.subheader("Configuration")
     ebird_ok = bool(os.environ.get("EBIRD_API_KEY"))
-    st.write(f"eBird API key: {'✅ set' if ebird_ok else '❌ missing'}")
-
     hf_token_ok = bool(os.environ.get("HUGGINGFACE_API_TOKEN"))
-    from src.config import MODELS, DEFAULT_MODEL_ALIAS, resolve_model
-    raw_model = os.environ.get("HF_MODEL_ID", DEFAULT_MODEL_ALIAS)
-    repo_id, model_cfg = resolve_model(raw_model)
-    model_label = f"{raw_model} → `{repo_id}`" if model_cfg else f"`{repo_id}`"
-    st.write(f"HuggingFace token: {'✅ set' if hf_token_ok else '❌ missing'}")
-    st.write(f"Model: {model_label}")
-    if model_cfg and model_cfg.notes:
-        st.caption(f"ℹ️ {model_cfg.notes}")
-
     llm_ok = hf_token_ok
 
     st.divider()
 
-    if st.button("🔄 New Conversation", use_container_width=True):
+    if st.button("🔄 New Conversation", use_container_width=True, key="btn_new_conversation"):
         st.session_state.messages = []
-        st.session_state.viz_snapshot = {"type": None, "data": None, "title": None}
+        st.session_state.viz_snapshot = {"type": None, "data": None, "title": None, "table": None}
+        clear_log_buffer()
+        st.session_state.log_entries = []
         # Clear agent memory without re-importing to avoid re-building the LLM
         try:
             import src.agent as _agent_mod
@@ -83,6 +132,27 @@ with st.sidebar:
         except Exception:
             pass
         st.rerun()
+
+    st.divider()
+    st.checkbox("🪵 Show log pane", key="show_logs")
+
+    if st.session_state.get("show_logs", False):
+        _LEVEL_OPTIONS = ["DEBUG", "INFO", "WARNING", "ERROR"]
+
+        selected_level = st.selectbox(
+            "Min level",
+            options=_LEVEL_OPTIONS,
+            index=1,
+            key="log_level_filter",
+        )
+        if st.button("🗑️ Clear logs", use_container_width=True, key="btn_clear_log"):
+            clear_log_buffer()
+            st.session_state.log_entries = []
+            st.rerun()
+
+        _log_threshold = _LOG_LEVEL_ORDER.get(selected_level, 0)
+        log_area = st.empty()
+        _render_log_into(log_area, st.session_state.log_entries, _log_threshold)
 
     st.divider()
     st.markdown(
@@ -110,20 +180,29 @@ with viz_col:
     st.subheader("Visualization")
 
     snap = st.session_state.viz_snapshot
+    st.caption(f"Loaded: {snap['type'] or 'none'}")
+
     if snap["type"] == "map":
-        st.caption(snap.get("title", "Map"))
-        try:
+        if snap["data"] is not None:
             from streamlit_folium import st_folium
-            import folium
-            # Reconstruct folium map from stored HTML
-            fmap_html = snap["data"]
-            # Render via components.html for full interactivity
-            st.components.v1.html(fmap_html, height=500, scrolling=False)
-        except Exception as exc:
-            st.error(f"Could not render map: {exc}")
+            st_folium(
+                snap["data"],
+                height=480,
+                use_container_width=True,
+                returned_objects=[],  # prevent map interactions from triggering reruns
+            )
+            if snap.get("table"):
+                import pandas as pd
+                st.caption(f"Top {len(snap['table'])} sightings")
+                st.dataframe(
+                    pd.DataFrame(snap["table"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        else:
+            st.error("Map data is empty.")
 
     elif snap["type"] == "chart":
-        st.caption(snap.get("title", "Chart"))
         try:
             import plotly.graph_objects as go
             fig = go.Figure(snap["data"])
@@ -143,17 +222,6 @@ with viz_col:
 with chat_col:
     st.subheader("Chat")
 
-    # Render conversation history
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    # Chat input
-    user_input = st.chat_input(
-        "Ask about birds, regions, sightings, hotspots…",
-        disabled=not (ebird_ok and llm_ok),
-    )
-
     if not (ebird_ok and llm_ok):
         st.warning(
             "One or more API keys are missing. "
@@ -161,36 +229,111 @@ with chat_col:
             icon="⚠️",
         )
 
-    if user_input:
-        # Append user message
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
+    turn_count = sum(1 for m in st.session_state.messages if m["role"] == "user")
+    limit_reached = turn_count >= MAX_TURNS
+    if limit_reached:
+        st.warning(
+            f"You've reached the **{MAX_TURNS}-message limit** for this conversation. "
+            "Click **🔄 New Conversation** in the sidebar to start a fresh session.",
+            icon="🛑",
+        )
 
-        # Run agent
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking…"):
-                try:
-                    # Lazy import so startup doesn't build the LLM before keys are set
-                    import src.agent as _agent_mod
-                    # Clear VizBuffer before the call
-                    import src.utils.state as _state
-                    _state.clear_viz_buffer()
+    # Chat input at the top
+    user_input = st.chat_input(
+        "Ask about birds, regions, sightings, hotspots…",
+        disabled=not (ebird_ok and llm_ok) or limit_reached,
+    )
 
-                    response = _agent_mod.run_agent(user_input)
+    # Scrollable chat history below the input
+    history_container = st.container(height=600, border=False)
+    with history_container:
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
-                    # Snapshot the VizBuffer produced during this agent turn
-                    st.session_state.viz_snapshot = {
-                        "type": _state.VizBuffer["type"],
-                        "data": _state.VizBuffer["data"],
-                        "title": _state.VizBuffer["title"],
+        # Auto-scroll to the latest message on every rerun.
+        # The iframe created by components.html sits inside the scrollable container;
+        # walking up the DOM to the first overflowing ancestor and scrolling it works
+        # regardless of Streamlit's internal class names.
+        st.components.v1.html(
+            """
+            <script>
+            (function () {
+                let el = window.frameElement;
+                for (let i = 0; i < 15 && el; i++) {
+                    el = el.parentElement;
+                    if (el && el.scrollHeight > el.clientHeight) {
+                        el.scrollTop = el.scrollHeight;
+                        break;
                     }
-                except Exception as exc:
-                    response = f"⚠️ An error occurred: {exc}"
+                }
+            })();
+            </script>
+            """,
+            height=0,
+        )
 
-            st.markdown(response)
+    if user_input:
+        import src.utils.state as _state
+        import src.agent as _agent_mod
+        _state.clear_viz_buffer()
+        # Drop stale table immediately so it doesn't persist during intermediate
+        # re-renders while the agent is working on the new map.
+        st.session_state.viz_snapshot["table"] = None
+        response = ""
 
+        # Stream the agent, showing live progress via st.status
+        with st.status("Working…", expanded=True) as status:
+            try:
+                for event in _agent_mod.stream_agent(user_input, history=st.session_state.messages):
+                    if event["type"] == "tool_start":
+                        st.write(event["label"])
+                    elif event["type"] == "tool_end":
+                        # Snapshot VizBuffer immediately after each tool completes
+                        # so we capture it even if the final text event is missing.
+                        if _state.VizBuffer["type"] is not None:
+                            st.session_state.viz_snapshot = {
+                                "type": _state.VizBuffer["type"],
+                                "data": _state.VizBuffer["data"],
+                                "title": _state.VizBuffer["title"],
+                                "table": _state.VizBuffer.get("table"),
+                            }
+                        output = event.get("output", "")
+                        if output:
+                            with st.expander(f"↳ {event['name']} result", expanded=False):
+                                st.text(output)
+                        st.write("✓ Done")
+                    elif event["type"] == "final":
+                        response = event["content"]
+                    # Live-drain log buffer so the sidebar pane updates incrementally
+                    _new_logs = list(LogBuffer)
+                    if _new_logs:
+                        st.session_state.log_entries.extend(_new_logs)
+                        clear_log_buffer()
+                        if log_area is not None:
+                            _render_log_into(log_area, st.session_state.log_entries, _log_threshold)
+                status.update(label="Done", state="complete", expanded=False)
+            except Exception as exc:
+                response = f"⚠️ An error occurred: {exc}"
+                status.update(label="Error", state="error", expanded=True)
+
+        # Final safety-net capture after full stream
+        if _state.VizBuffer["type"] is not None:
+            st.session_state.viz_snapshot = {
+                "type": _state.VizBuffer["type"],
+                "data": _state.VizBuffer["data"],
+                "title": _state.VizBuffer["title"],
+                "table": _state.VizBuffer.get("table"),
+            }
+
+        st.session_state.messages.append({"role": "user", "content": user_input})
         st.session_state.messages.append({"role": "assistant", "content": response})
 
-        # Force re-run so the viz column updates with the new snapshot
+        # Flush new log entries from the in-memory buffer into session_state so
+        # they survive the upcoming rerun (LogBuffer is module-level and may not
+        # persist across Streamlit worker restarts).
+        st.session_state.log_entries.extend(list(LogBuffer))
+        clear_log_buffer()
+
+        # Rerun to refresh both chat history and viz panel
         st.rerun()

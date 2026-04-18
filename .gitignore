@@ -1,6 +1,23 @@
 # === Secrets — NEVER commit these ===
 .env
 
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfvars
+*.tfvars.json
+.terraformrc
+terraform.rc
+
 # Python
 __pycache__/
 *.py[cod]

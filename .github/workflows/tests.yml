@@ -2,7 +2,7 @@ name: Unit Tests
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: ["main", "master", "develop"]
   pull_request:
     branches: ["main", "master"]
 
@@ -21,7 +21,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.test
+          file: Dockerfile
+          target: test
           load: true
           tags: ebird-llm-test:latest
           cache-from: type=gha

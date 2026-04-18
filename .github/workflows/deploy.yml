@@ -1,0 +1,91 @@
+name: Deploy
+
+on:
+  # Triggers only after Unit Tests pass on the deployment branches.
+  # Using workflow_run ensures tests always gate deploys, even on direct pushes.
+  workflow_run:
+    workflows: ["Unit Tests"]
+    branches: ["master", "develop"]
+    types: [completed]
+
+jobs:
+  deploy:
+    # Only run when the triggering test workflow succeeded
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write  # required for OIDC token request
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Check out the exact commit that triggered the upstream workflow_run
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      # ── Determine environment from branch ─────────────────────────────────
+      - name: Set deployment environment
+        id: env
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+          if [[ "$BRANCH" == "master" ]]; then
+            echo "TF_ENV=prod"            >> "$GITHUB_ENV"
+            echo "BACKEND_FILE=backend-prod.hcl" >> "$GITHUB_ENV"
+            echo "TFVARS_FILE=prod.tfvars"       >> "$GITHUB_ENV"
+          else
+            echo "TF_ENV=dev"             >> "$GITHUB_ENV"
+            echo "BACKEND_FILE=backend-dev.hcl"  >> "$GITHUB_ENV"
+            echo "TFVARS_FILE=dev.tfvars"        >> "$GITHUB_ENV"
+          fi
+          # Use the short SHA as the image tag for traceability
+          echo "IMAGE_TAG=$(echo '${{ github.event.workflow_run.head_sha }}' | cut -c1-7)" >> "$GITHUB_ENV"
+
+      # ── AWS authentication (OIDC — no long-lived credentials stored) ───────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-2
+
+      # ── Build and push production Docker image to ECR ─────────────────────
+      - name: Login to Amazon ECR
+        id: ecr_login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime
+          push: true
+          # Tag with both the short SHA (immutable, traceable) and env label
+          tags: |
+            ${{ steps.ecr_login.outputs.registry }}/ebird-llm-${{ env.TF_ENV }}:${{ env.IMAGE_TAG }}
+            ${{ steps.ecr_login.outputs.registry }}/ebird-llm-${{ env.TF_ENV }}:${{ env.TF_ENV }}-latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Terraform apply ────────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init -backend-config=${{ env.BACKEND_FILE }}
+
+      - name: Terraform apply
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve \
+            -var-file="${{ env.TFVARS_FILE }}" \
+            -var="image_tag=${{ env.IMAGE_TAG }}"

@@ -1,5 +1,7 @@
 # eBird LangChain Birding Assistant
 
+![Unit Tests](https://github.com/cgauvi/ebird-llm/actions/workflows/tests.yml/badge.svg)
+
 An agentic Python application that lets you explore bird sightings through natural language.  
 A LangChain agent backed by a **HuggingFace Inference API** model queries the **eBird API v2**
 and renders interactive maps and charts inside a **Streamlit** split-panel UI.
@@ -132,20 +134,15 @@ The app opens at `http://localhost:8501`.
 
 ## Model Selection
 
-Set `HF_MODEL_ID` in `.env` to any of the short aliases in the catalog
-(defined in `src/config.py`):
+Use the **Model** dropdown in the Streamlit sidebar to switch models at runtime.
+Changing the selection resets the conversation and rebuilds the LLM automatically.
 
 | Alias | Model | Notes |
 |---|---|---|
 | `qwen2.5-72b` | Qwen/Qwen2.5-72B-Instruct | **default** |
-| `llama3.3-70b` | meta-llama/Llama-3.3-70B-Instruct | requires Meta licence |
-| `mistral-small-3.1` | mistralai/Mistral-Small-3.1-24B-Instruct-2503 | |
-| `deepseek-r1-distill-qwen-32b` | deepseek-ai/DeepSeek-R1-Distill-Qwen-32B | |
-| `phi-4` | microsoft/Phi-4 | requires Microsoft licence |
 | `gemma-3-27b` | google/gemma-3-27b-it | requires Google licence |
 
-You can also pass a full HuggingFace repo ID directly (e.g. `HF_MODEL_ID=org/ModelName`).  
-All models must support tool/function calling.
+All models are served through the HuggingFace Inference API and must support tool/function calling.
 
 ---
 
