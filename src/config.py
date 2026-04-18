@@ -42,32 +42,6 @@ MODELS: dict[str, ModelConfig] = {
         description="Qwen 2.5 72B — best quality, recommended default",
         context_window=131_072,
     ),
-    # ---- Llama 3.x ----
-    "llama3.3-70b": ModelConfig(
-        repo_id="meta-llama/Llama-3.3-70B-Instruct",
-        description="Meta Llama 3.3 70B — strong reasoning and tool calling",
-        context_window=131_072,
-        notes="Requires accepting Meta licence on HuggingFace.",
-    ),
-    # ---- Mistral ----
-    "mistral-small-3.1": ModelConfig(
-        repo_id="mistralai/Mistral-Small-3.1-24B-Instruct-2503",
-        description="Mistral Small 3.1 24B — latest Mistral with vision support",
-        context_window=131_072,
-    ),
-    # ---- DeepSeek ----
-    "deepseek-r1-distill-qwen-32b": ModelConfig(
-        repo_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-        description="DeepSeek R1 distilled on Qwen 32B — strong reasoning",
-        context_window=131_072,
-    ),
-    # ---- Microsoft Phi (GPT-OSS) ----
-    "phi-4": ModelConfig(
-        repo_id="microsoft/Phi-4",
-        description="Microsoft Phi-4 14B — top-tier small model, excellent tool calling",
-        context_window=16_384,
-        notes="Requires accepting Microsoft licence on HuggingFace.",
-    ),
     # ---- Google Gemma ----
     "gemma-3-27b": ModelConfig(
         repo_id="google/gemma-3-27b-it",

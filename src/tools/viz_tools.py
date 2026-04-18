@@ -5,36 +5,86 @@ Both tools write their output into src.utils.state.VizBuffer so that app.py can
 render the result in the right-hand panel after the agent finishes its turn.
 They return a short human-readable confirmation string to the agent.
 """
-
+# %%
 import json
+from pathlib import Path
 from statistics import mean
 from typing import Literal
 
 import folium
+from folium.plugins import MarkerCluster
 import pandas as pd
 import plotly.express as px
 from langchain.tools import tool
 from langchain_core.tools import ToolException
 
-from src.utils.state import VizBuffer
+from src.utils.state import VizBuffer, get_last_observations, get_last_obs_file, get_obs_dataframe
 
 
 # ---------------------------------------------------------------------------
-# Helper — parse observations JSON safely
+# Helper — load observations from a file path or session cache
 # ---------------------------------------------------------------------------
 
 
-def _parse_obs(observations_json: str) -> list[dict]:
-    try:
-        data = json.loads(observations_json)
-    except json.JSONDecodeError as exc:
-        raise ToolException(
-            "observations_json is not valid JSON. "
-            "Pass the raw output from an eBird observation tool."
-        ) from exc
-    if not isinstance(data, list):
-        raise ToolException("Expected a JSON array of observations.")
-    return data
+def _load_obs(observations_file: str) -> list[dict]:
+    """Return observation records from *observations_file* or the session cache.
+
+    Priority:
+    1. If *observations_file* is provided, read and parse that JSON file.
+    2. Fall back to the in-process DataFrame cache (fastest, zero-copy).
+    3. Fall back to the raw JSON string cache kept by ``set_last_observations``.
+    """
+    if observations_file and observations_file.strip():
+        path = Path(observations_file.strip())
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ToolException(
+                    f"Failed to parse observations file {path}: {exc}"
+                ) from exc
+            if isinstance(data, dict) and "observations" in data:
+                data = data["observations"]
+            if not isinstance(data, list):
+                raise ToolException("Expected a JSON array of observations in the file.")
+            return data
+        # File not found — fall through to session cache below
+
+    # Fall back to session DataFrame cache
+    df = get_obs_dataframe()
+    if df is not None and not df.empty:
+        return df.to_dict(orient="records")
+
+    # Fall back to last known observations file written this session
+    last_file = get_last_obs_file()
+    if last_file:
+        path = Path(last_file)
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and "observations" in data:
+                    data = data["observations"]
+                if isinstance(data, list):
+                    return data
+            except json.JSONDecodeError:
+                pass
+
+    # Fall back to raw JSON string cache
+    cached = get_last_observations()
+    if cached:
+        try:
+            data = json.loads(cached)
+            if isinstance(data, dict) and "observations" in data:
+                data = data["observations"]
+            if isinstance(data, list) and all(isinstance(r, dict) for r in data):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    raise ToolException(
+        "No observation data available. Run an eBird data tool first, "
+        "then pass the returned file path as observations_file."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +93,7 @@ def _parse_obs(observations_json: str) -> list[dict]:
 
 
 @tool
-def create_sightings_map(observations_json: str) -> str:
+def create_sightings_map(observations_file: str = "") -> str:
     """Build an interactive map that plots bird sighting locations.
 
     Each sighting is shown as a circle marker.  Clicking a marker reveals the
@@ -53,14 +103,15 @@ def create_sightings_map(observations_json: str) -> str:
     to *show*, *map*, or *visualise* sightings geographically.
 
     Args:
-        observations_json: The raw JSON string returned by any eBird
-            observation tool (recent, historic, notable, etc.).
+        observations_file: Path to the JSON file returned by an eBird data tool
+            (included in the tool's output as "JSON file: /path/to/file.json").
+            Leave empty to use the session cache automatically.
 
     Returns:
         A short confirmation string, e.g. "Map created with 42 sightings."
         The map itself is rendered in the Streamlit right panel automatically.
     """
-    records = _parse_obs(observations_json)
+    records = _load_obs(observations_file)
 
     # Filter records that have coordinates
     geo_records = [
@@ -80,10 +131,15 @@ def create_sightings_map(observations_json: str) -> str:
         tiles="CartoDB positron",
     )
 
-    # Colour cycle for variety
-    colours = [
-        "#e74c3c", "#3498db", "#2ecc71", "#f39c12",
-        "#9b59b6", "#1abc9c", "#e67e22", "#34495e",
+    # Cluster overlapping / nearby markers so multiple observations at the
+    # same location don't pile up as a single invisible point.
+    cluster = MarkerCluster(name="Sightings").add_to(fmap)
+
+    # Folium icon colours (subset that renders reliably)
+    ICON_COLOURS = [
+        "red", "blue", "green", "purple", "orange",
+        "darkred", "darkblue", "darkgreen", "cadetblue", "darkpurple",
+        "pink", "lightblue", "lightgreen", "gray", "beige",
     ]
 
     species_colour: dict[str, str] = {}
@@ -97,30 +153,54 @@ def create_sightings_map(observations_json: str) -> str:
         obs_dt = rec.get("obsDt", "")
 
         if species not in species_colour:
-            species_colour[species] = colours[colour_idx % len(colours)]
+            species_colour[species] = ICON_COLOURS[colour_idx % len(ICON_COLOURS)]
             colour_idx += 1
 
-        tooltip_html = (
+        lat = float(rec["lat"])
+        lng = float(rec["lng"])
+        popup_html = (
             f"<b>{species}</b><br>"
             f"<i>{sci}</i><br>"
             f"Count: {count}<br>"
             f"Location: {loc}<br>"
-            f"Date: {obs_dt}"
+            f"Date: {obs_dt}<br>"
+            f"<small>📍 {lat:.5f}°N, {abs(lng):.5f}°{'W' if lng < 0 else 'E'}</small>"
         )
 
-        folium.CircleMarker(
-            location=[float(rec["lat"]), float(rec["lng"])],
-            radius=7,
-            color=species_colour[species],
-            fill=True,
-            fill_opacity=0.75,
-            tooltip=folium.Tooltip(tooltip_html),
-        ).add_to(fmap)
+        folium.Marker(
+            location=[lat, lng],
+            popup=folium.Popup(popup_html, max_width=280),
+            tooltip=f"{species} (n={count})",
+            icon=folium.Icon(color=species_colour[species]),
+        ).add_to(cluster)
 
-    # Store HTML string in shared buffer
+    # ------------------------------------------------------------------
+    # Top-10 table: most numerous individual observations (for the panel
+    # shown below the map in the Streamlit UI).
+    # ------------------------------------------------------------------
+    df_geo = pd.DataFrame(geo_records)
+    if "howMany" in df_geo.columns:
+        df_geo["howMany"] = pd.to_numeric(df_geo["howMany"], errors="coerce").fillna(1).astype(int)
+    else:
+        df_geo["howMany"] = 1
+
+    display_cols = {"comName": "Species", "howMany": "Count",
+                    "locName": "Location", "obsDt": "Date"}
+    available = {k: v for k, v in display_cols.items() if k in df_geo.columns}
+    df_top = (
+        df_geo[list(available.keys())]
+        .rename(columns=available)
+        .sort_values("Count", ascending=False)
+        .head(10)
+        .reset_index(drop=True)
+    )
+
+    # Store Map object (not HTML) so app.py can render it with st_folium,
+    # which correctly sizes and places the map in the Streamlit panel.
     VizBuffer["type"] = "map"
-    VizBuffer["data"] = fmap._repr_html_()
+    VizBuffer["data"] = fmap          # folium.Map object
     VizBuffer["title"] = "Bird Sightings Map"
+    VizBuffer["table"] = df_top.to_dict(orient="records")
 
     return f"Map created with {len(geo_records)} sightings."
 
@@ -132,7 +212,7 @@ def create_sightings_map(observations_json: str) -> str:
 
 @tool
 def create_historical_chart(
-    observations_json: str,
+    observations_file: str = "",
     chart_type: Literal["bar", "line"] = "bar",
     top_n_species: int = 15,
 ) -> str:
@@ -142,8 +222,9 @@ def create_historical_chart(
     observations over time or by species count.
 
     Args:
-        observations_json: The raw JSON string returned by any eBird
-            observation tool (historic, recent, notable, etc.).
+        observations_file: Path to the JSON file returned by an eBird data tool
+            (included in the tool's output as "JSON file: /path/to/file.json").
+            Leave empty to use the session cache automatically.
         chart_type: 'bar' (default) for a bar chart ranked by count,
             or 'line' for a time-series line chart by date.
         top_n_species: Show only the top N most-observed species (default 15).
@@ -153,7 +234,7 @@ def create_historical_chart(
         A short confirmation string, e.g. "Chart created with 120 records."
         The chart is rendered in the Streamlit right panel automatically.
     """
-    records = _parse_obs(observations_json)
+    records = _load_obs(observations_file)
     if not records:
         raise ToolException("The observations list is empty — nothing to chart.")
 
@@ -232,3 +313,5 @@ VIZ_TOOLS = [
     create_sightings_map,
     create_historical_chart,
 ]
+
+# %%
