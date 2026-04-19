@@ -26,6 +26,7 @@ dependencies:
       - plotly>=5.20.0
       # Data handling
       - pandas>=2.2.0
+      - statsmodels>=0.14.0
       # HTTP client
       - requests>=2.31.0
       # Config
