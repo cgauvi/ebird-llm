@@ -49,6 +49,19 @@ MODELS: dict[str, ModelConfig] = {
         context_window=131_072,
         notes="Requires accepting Google licence on HuggingFace.",
     ),
+    # ---- OpenAI GPT-OSS ----
+    "gpt-oss-120b": ModelConfig(
+        repo_id="openai/gpt-oss-120b",
+        description="OpenAI GPT-OSS 120B — high reasoning, fits on single 80GB GPU (117B params, 5.1B active)",
+        context_window=131_072,
+        notes="Uses harmony response format; requires chat template for correct output.",
+    ),
+    "gpt-oss-20b": ModelConfig(
+        repo_id="openai/gpt-oss-20b",
+        description="OpenAI GPT-OSS 20B — lower latency, fits within 16GB memory (21B params, 3.6B active)",
+        context_window=131_072,
+        notes="Uses harmony response format; requires chat template for correct output.",
+    ),
 }
 
 DEFAULT_MODEL_ALIAS = "qwen2.5-72b"

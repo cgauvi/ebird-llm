@@ -7,6 +7,10 @@ Tools:  6 eBird API tools + 2 visualization tools + 1 summarizer tool.
 Memory: Conversation history is passed explicitly on every call from
         st.session_state.messages (maintained by the Streamlit UI).
         The agent itself is stateless — no in-process checkpointer.
+        Context degradation is controlled via a rolling-summary strategy:
+        once history exceeds _HISTORY_SUMMARY_THRESHOLD messages, the
+        oldest entries are compressed into a single summary message and
+        only the most recent _HISTORY_TAIL_KEEP messages are kept verbatim.
 
 Public API
 ----------
@@ -39,29 +43,78 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Tool auto-summarizer wrapper
+# Tool wrapper — error handling + output summarisation + retry cap
 # ---------------------------------------------------------------------------
+
+_MAX_TOOL_RETRIES = 3
+
+# Per-run error counter: {tool_name: number_of_errors_this_run}
+# Reset at the start of every run_agent / stream_agent call.
+_tool_error_counts: dict[str, int] = {}
+
+
+def _reset_tool_error_counts() -> None:
+    """Clear per-tool error counters before each new agent invocation."""
+    _tool_error_counts.clear()
 
 
 def _wrap_with_summarizer(t: StructuredTool) -> StructuredTool:
-    """Return a new StructuredTool that auto-summarizes large string outputs.
+    """Return a new StructuredTool that:
 
-    When the wrapped tool returns a string whose length exceeds
-    MAX_TOOL_OUTPUT_CHARS the full text is saved to a temp file and a compact
-    Markdown summary is returned instead, keeping the LLM context small.
+    1. Catches *all* exceptions and returns them as a formatted error string so
+       the LLM can see the problem and retry with corrected arguments.
+    2. Enforces a per-run retry cap of _MAX_TOOL_RETRIES: once a tool has
+       errored that many times the wrapper tells the LLM to stop retrying.
+    3. Auto-summarizes large string outputs (original behaviour).
     """
     original_func = getattr(t, "func", None)
     if original_func is None:
         return t
 
-    def _summarizing_func(*args, **kwargs):
-        result = original_func(*args, **kwargs)
+    tool_name = t.name
+
+    def _wrapped_func(*args, **kwargs):
+        # Hard-stop once the tool has already exhausted its retry budget.
+        if _tool_error_counts.get(tool_name, 0) >= _MAX_TOOL_RETRIES:
+            return (
+                f"⚠️ Tool '{tool_name}' has already failed {_MAX_TOOL_RETRIES} "
+                f"times in this run. Do not call it again — inform the user of "
+                f"the problem instead."
+            )
+
+        try:
+            result = original_func(*args, **kwargs)
+        except Exception as exc:
+            _tool_error_counts[tool_name] = _tool_error_counts.get(tool_name, 0) + 1
+            remaining = _MAX_TOOL_RETRIES - _tool_error_counts[tool_name]
+            logger.warning(
+                "Tool '%s' error (attempt %d/%d): %s",
+                tool_name, _tool_error_counts[tool_name], _MAX_TOOL_RETRIES, exc,
+            )
+            add_log_entry(
+                "WARNING", "src.agent",
+                f"Tool '{tool_name}' error (attempt {_tool_error_counts[tool_name]}/{_MAX_TOOL_RETRIES}): {exc}",
+            )
+            msg = f"⚠️ An error occurred: {exc}"
+            if remaining > 0:
+                msg += (
+                    f"\n\nPlease retry this tool call with corrected arguments "
+                    f"({remaining} attempt(s) remaining)."
+                )
+            else:
+                msg += (
+                    f"\n\nNo retries remaining for '{tool_name}'. "
+                    f"Please inform the user about this error."
+                )
+            return msg
+
+        # Summarize large outputs so the LLM context stays manageable.
         if isinstance(result, str) and len(result) > MAX_TOOL_OUTPUT_CHARS:
-            return summarize_text(result, title=t.name)
+            return summarize_text(result, title=tool_name)
         return result
 
     return StructuredTool.from_function(
-        func=_summarizing_func,
+        func=_wrapped_func,
         name=t.name,
         description=t.description,
         args_schema=t.args_schema,
@@ -164,10 +217,9 @@ def _get_agent():
     if _agent is not None:
         return _agent
 
-    # Wrap eBird + viz tools so outputs exceeding MAX_TOOL_OUTPUT_CHARS are
-    # automatically saved to a temp file and replaced with a compact summary.
-    wrapped_tools = [_wrap_with_summarizer(t) for t in EBIRD_TOOLS + VIZ_TOOLS]
-    all_tools = wrapped_tools + SUMMARIZER_TOOLS
+    # Wrap all tools: catches exceptions for LLM-visible retry messages,
+    # enforces per-run retry cap, and auto-summarizes large outputs.
+    all_tools = [_wrap_with_summarizer(t) for t in EBIRD_TOOLS + VIZ_TOOLS + SUMMARIZER_TOOLS]
     llm = build_llm()
 
     _agent = create_react_agent(
@@ -182,6 +234,40 @@ def _get_agent():
 # History helpers
 # ---------------------------------------------------------------------------
 
+# Rolling-summary thresholds.  Once history has more than
+# _HISTORY_SUMMARY_THRESHOLD entries the oldest messages are compressed
+# into a single AIMessage summary; only the most recent
+# _HISTORY_TAIL_KEEP messages are kept verbatim.
+_HISTORY_SUMMARY_THRESHOLD = 20
+_HISTORY_TAIL_KEEP = 6
+
+
+def _compress_history(history: list[dict]) -> list[dict]:
+    """Return a shortened history list.
+
+    The oldest (len(history) - _HISTORY_TAIL_KEEP) entries are summarised
+    into a single synthetic assistant message prepended to the tail.
+    """
+    old = history[:-_HISTORY_TAIL_KEEP]
+    recent = history[-_HISTORY_TAIL_KEEP:]
+    blob = "\n".join(
+        f"{m['role'].upper()}: {m['content']}" for m in old
+    )
+    summary = summarize_text(blob, title="earlier conversation")
+    logger.info(
+        "_compress_history: compressed %d messages into a summary (%d chars)",
+        len(old), len(summary),
+    )
+    add_log_entry(
+        "INFO", "src.agent",
+        f"History compressed: {len(old)} messages → summary ({len(summary)} chars)",
+    )
+    synthetic = {
+        "role": "assistant",
+        "content": f"[Summary of earlier conversation]\n{summary}",
+    }
+    return [synthetic] + recent
+
 
 def _build_messages(
     user_input: str,
@@ -190,9 +276,15 @@ def _build_messages(
     """Build the full LangChain message list from prior history + new input.
 
     history entries are dicts with keys 'role' ('user'/'assistant') and 'content'.
+    When history exceeds _HISTORY_SUMMARY_THRESHOLD entries the oldest messages
+    are compressed into a rolling summary to prevent context degradation.
     """
+    msgs = history or []
+    if len(msgs) > _HISTORY_SUMMARY_THRESHOLD:
+        msgs = _compress_history(msgs)
+
     messages: list = []
-    for msg in (history or []):
+    for msg in msgs:
         if msg["role"] == "user":
             messages.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == "assistant":
@@ -205,6 +297,7 @@ def run_agent(user_input: str, history: list[dict] | None = None) -> str:
     """Run the agent and return its final text response."""
     from langchain_core.messages import ToolMessage
 
+    _reset_tool_error_counts()
     logger.info("run_agent called | input: %s", user_input[:200])
     add_log_entry("INFO", "src.agent", f"User: {user_input}")
 
@@ -272,8 +365,10 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
       • Format A (array):  '[{"name": "...", "arguments": {...}}]'
       • Format B (object): '{"name": "...", "parameters": {...}}'
     """
+    _reset_tool_error_counts()
     agent = _get_agent()
     _tool_map = {t.name: t for t in EBIRD_TOOLS + VIZ_TOOLS + SUMMARIZER_TOOLS}
+    _last_final_content: str = ""
     logger.info("stream_agent called | input: %s", user_input[:200])
     add_log_entry("INFO", "src.agent", f"User: {user_input}")
 
@@ -285,7 +380,16 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
             )
         )
 
-    chunks = _stream_invoke()
+    _VIZ_TOOL_NAMES = {"create_sightings_map", "create_historical_chart"}
+
+    try:
+        chunks = _stream_invoke()
+    except Exception as exc:
+        logger.warning("stream_agent: agent.stream() raised: %s", exc)
+        add_log_entry("WARNING", "src.agent", f"Agent stream error: {exc}")
+        yield {"type": "final", "content": str(exc)}
+        return
+
     for chunk in chunks:
         if "agent" in chunk:
             for msg in chunk["agent"]["messages"]:
@@ -335,7 +439,14 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
                                     "name": tool_name,
                                     "label": _TOOL_LABELS.get(tool_name, f"Running {tool_name}…"),
                                 }
+                                _pre_viz_id = id(VizBuffer["data"])
                                 result = _tool_map[tool_name].invoke(tool_args)
+                                if tool_name in _VIZ_TOOL_NAMES and id(VizBuffer["data"]) == _pre_viz_id:
+                                    logger.warning(
+                                        "Viz tool '%s' (text-based fallback) ran but VizBuffer did not change",
+                                        tool_name,
+                                    )
+                                    add_log_entry("WARNING", "src.agent", f"Viz tool '{tool_name}' ran but VizBuffer unchanged")
                                 yield {
                                     "type": "tool_end",
                                     "name": tool_name,
@@ -354,11 +465,18 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
                             if cached:
                                 _fake_tool: str | None = None
                                 if re.search(
-                                    r"map created with \d+", stripped, re.IGNORECASE
+                                    r"map created with \d+"
+                                    r"|(?:creat|generat|produc|render|built?|plott|display)"
+                                    r"(?:ed|ing).{0,40}(?:\bmap\b|sighting)",
+                                    stripped, re.IGNORECASE,
                                 ):
                                     _fake_tool = "create_sightings_map"
                                 elif re.search(
-                                    r"chart created with \d+", stripped, re.IGNORECASE
+                                    r"chart created with \d+"
+                                    r"|(?:creat|generat|produc|render|built?|plott|display)"
+                                    r"(?:ed|ing).{0,40}(?:chart|graph|plot|histogram)"
+                                    r"|here(?:'s| is).{0,20}(?:chart|graph|plot)",
+                                    stripped, re.IGNORECASE,
                                 ):
                                     _fake_tool = "create_historical_chart"
                                 if _fake_tool and _fake_tool in _tool_map:
@@ -385,9 +503,16 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
                                             if obs_file
                                             else {}
                                         )
+                                        _pre_viz_id = id(VizBuffer["data"])
                                         _result = _tool_map[_fake_tool].invoke(
                                             invoke_args
                                         )
+                                        if id(VizBuffer["data"]) == _pre_viz_id:
+                                            logger.warning(
+                                                "Viz tool '%s' (inline fallback) ran but VizBuffer did not change",
+                                                _fake_tool,
+                                            )
+                                            add_log_entry("WARNING", "src.agent", f"Viz tool '{_fake_tool}' ran but VizBuffer unchanged")
                                         yield {
                                             "type": "tool_end",
                                             "name": _fake_tool,
@@ -398,6 +523,7 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
                                             "Auto-fallback '%s' failed: %s",
                                             _fake_tool, _exc,
                                         )
+                        _last_final_content = content
                         yield {"type": "final", "content": content}
         if "tools" in chunk:
             for msg in chunk["tools"]["messages"]:
@@ -412,6 +538,64 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
                     "name": tool_name,
                     "output": output,
                 }
+
+    # Post-stream fallback: LLM claimed to create a visualization in natural
+    # language but the inline fallback missed the phrasing and VizBuffer is
+    # still empty.  Re-check against the final response and the user's intent.
+    if VizBuffer["type"] is None and _last_final_content:
+        _obs_file = get_last_obs_file()
+        _obs_data = get_last_observations()
+        if _obs_file or _obs_data:
+            _map_signal = re.search(
+                r"(?:creat|generat|produc|render|built?|plott|display)(?:ed|ing).{0,50}(?:\bmap\b)"
+                r"|\bmap\b.{0,50}(?:creat|generat|produc|render|built?|plott|display)(?:ed|ing)"
+                r"|here(?:'s| is).{0,20}\bmap\b",
+                _last_final_content, re.IGNORECASE,
+            )
+            _chart_signal = re.search(
+                r"(?:creat|generat|produc|render|built?|plott|display)(?:ed|ing).{0,50}(?:chart|graph|plot|histogram)"
+                r"|(?:chart|graph|plot|histogram).{0,50}(?:creat|generat|produc|render|built?|plott|display)(?:ed|ing)"
+                r"|here(?:'s| is).{0,20}(?:chart|graph|plot)",
+                _last_final_content, re.IGNORECASE,
+            )
+            _map_requested = re.search(r"\bmap\b", user_input, re.IGNORECASE)
+            _chart_requested = re.search(r"\bchart\b|\bplot\b|\bgraph\b", user_input, re.IGNORECASE)
+            _poststream_tool: str | None = None
+            if _map_signal or (_map_requested and not _chart_signal):
+                _poststream_tool = "create_sightings_map"
+            elif _chart_signal or _chart_requested:
+                _poststream_tool = "create_historical_chart"
+            if _poststream_tool and _poststream_tool in _tool_map:
+                add_log_entry(
+                    "INFO", "src.agent",
+                    f"Post-stream fallback: invoking {_poststream_tool} "
+                    "(VizBuffer empty after stream)",
+                )
+                logger.info("Post-stream fallback: invoking '%s'", _poststream_tool)
+                yield {
+                    "type": "tool_start",
+                    "name": _poststream_tool,
+                    "label": _TOOL_LABELS.get(_poststream_tool, f"Running {_poststream_tool}\u2026"),
+                }
+                try:
+                    _invoke_args = {"observations_file": _obs_file} if _obs_file else {}
+                    _pre_viz_id = id(VizBuffer["data"])
+                    _poststream_result = _tool_map[_poststream_tool].invoke(_invoke_args)
+                    if id(VizBuffer["data"]) == _pre_viz_id:
+                        logger.warning(
+                            "Viz tool '%s' (post-stream fallback) ran but VizBuffer did not change",
+                            _poststream_tool,
+                        )
+                        add_log_entry("WARNING", "src.agent", f"Viz tool '{_poststream_tool}' ran but VizBuffer unchanged")
+                    yield {
+                        "type": "tool_end",
+                        "name": _poststream_tool,
+                        "output": str(_poststream_result),
+                    }
+                except Exception as _exc:
+                    logger.warning(
+                        "Post-stream fallback '%s' failed: %s", _poststream_tool, _exc
+                    )
 
 
 def reset_agent() -> None:

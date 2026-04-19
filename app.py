@@ -193,7 +193,7 @@ with viz_col:
             )
             if snap.get("table"):
                 import pandas as pd
-                st.caption(f"Top {len(snap['table'])} sightings")
+                st.caption(f"{len(snap['table'])} sightings (same as map)")
                 st.dataframe(
                     pd.DataFrame(snap["table"]),
                     use_container_width=True,
@@ -291,7 +291,12 @@ with chat_col:
                     elif event["type"] == "tool_end":
                         # Snapshot VizBuffer immediately after each tool completes
                         # so we capture it even if the final text event is missing.
-                        if _state.VizBuffer["type"] is not None:
+                        # Only update if the viz data actually changed (new object identity)
+                        # to avoid re-rendering stale visuals.
+                        if (
+                            _state.VizBuffer["type"] is not None
+                            and _state.VizBuffer["data"] is not st.session_state.viz_snapshot["data"]
+                        ):
                             st.session_state.viz_snapshot = {
                                 "type": _state.VizBuffer["type"],
                                 "data": _state.VizBuffer["data"],
@@ -318,7 +323,10 @@ with chat_col:
                 status.update(label="Error", state="error", expanded=True)
 
         # Final safety-net capture after full stream
-        if _state.VizBuffer["type"] is not None:
+        if (
+            _state.VizBuffer["type"] is not None
+            and _state.VizBuffer["data"] is not st.session_state.viz_snapshot["data"]
+        ):
             st.session_state.viz_snapshot = {
                 "type": _state.VizBuffer["type"],
                 "data": _state.VizBuffer["data"],

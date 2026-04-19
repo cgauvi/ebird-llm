@@ -215,3 +215,11 @@ class EBirdClient:
         """Checklist and contributor stats for a region on a specific date."""
         path = f"/product/stats/{region_code}/{year}/{month:02d}/{day:02d}"
         return self._get(path)
+
+    def taxonomy_search(self, species_query: str, locale: str = "en") -> list[dict]:
+        """Search eBird taxonomy by common or scientific name.
+
+        Returns a list of matching species records with 'speciesCode',
+        'comName', and 'sciName' fields.
+        """
+        return self._get("/ref/taxonomy/ebird", {"fmt": "json", "q": species_query, "locale": locale})

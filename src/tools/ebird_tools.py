@@ -214,7 +214,21 @@ def _autocorrect_subregion(bad_code: str) -> tuple[str, str] | None:
 
     if best_code:
         return best_code, best_name or best_code
-    return None
+
+    # Records were fetched but no suffix had any character overlap with bad_suffix
+    # (e.g. numeric '01' vs purely alphabetic codes like 'ABI').  Raise a
+    # ToolException here — rather than returning None and letting callers raise a
+    # less-informative error — so the LLM receives actual valid codes immediately
+    # and can retry without an extra get_region_list round-trip.
+    parts_outer = bad_code.split("-")
+    parent_outer = "-".join(parts_outer[:-1])
+    example_codes = [r["code"] for r in records[:8] if r.get("code")]
+    tail = f" (and {len(records) - 8} more)" if len(records) > 8 else ""
+    raise ToolException(
+        f"'{bad_code}' could not be matched to a valid sub-region code for {parent_outer}. "
+        f"Valid codes include: {', '.join(example_codes)}{tail}. "
+        "Use one of these exact codes."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +470,9 @@ def get_region_list(
             region_type=region_type,
         )
         # Persist returned codes so future validation can check them.
-        register_codes([r["code"] for r in records if "code" in r])
+        # Also record the parent as fully-fetched so the cache validator knows
+        # it can safely reject any code not in this list.
+        register_codes([r["code"] for r in records if "code" in r], parent=parent)
         output = [
             {"code": r["code"], "name": r["name"]}
             for r in records
@@ -784,6 +800,61 @@ def validate_species(
             "source": f"species_list:{code}",
             "message": f"'{species_query}' not found in species list for {code}.",
             "suggestions": close,
+        })
+
+    # 3. Fall back to eBird taxonomy search (searches by common/scientific name)
+    try:
+        tax_records = _get_client().taxonomy_search(query)
+    except EBirdError:
+        tax_records = []
+
+    if tax_records:
+        # Exact match first
+        for r in tax_records:
+            if (
+                r.get("speciesCode", "").lower() == query
+                or r.get("comName", "").lower() == query
+                or r.get("sciName", "").lower() == query
+            ):
+                return json.dumps({
+                    "found": True,
+                    "source": "taxonomy",
+                    "species_code": r.get("speciesCode"),
+                    "comName": r.get("comName"),
+                    "sciName": r.get("sciName"),
+                })
+        # Best fuzzy match from taxonomy results
+        best_score = 0.0
+        best_record: dict = {}
+        for r in tax_records:
+            score = max(
+                difflib.SequenceMatcher(None, query, r.get("speciesCode", "").lower()).ratio(),
+                difflib.SequenceMatcher(None, query, r.get("comName", "").lower()).ratio(),
+                difflib.SequenceMatcher(None, query, r.get("sciName", "").lower()).ratio(),
+            )
+            if score > best_score:
+                best_score, best_record = score, r
+        if best_score >= 0.4 and best_record:
+            return json.dumps({
+                "found": True,
+                "source": "taxonomy",
+                "species_code": best_record.get("speciesCode"),
+                "comName": best_record.get("comName"),
+                "sciName": best_record.get("sciName"),
+            })
+        suggestions = [
+            {
+                "species_code": r.get("speciesCode"),
+                "comName": r.get("comName"),
+                "sciName": r.get("sciName"),
+            }
+            for r in tax_records[:3]
+        ]
+        return json.dumps({
+            "found": False,
+            "source": "taxonomy",
+            "message": f"'{species_query}' not found in taxonomy.",
+            "suggestions": suggestions,
         })
 
     return json.dumps({

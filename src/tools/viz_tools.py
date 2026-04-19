@@ -175,8 +175,8 @@ def create_sightings_map(observations_file: str = "") -> str:
         ).add_to(cluster)
 
     # ------------------------------------------------------------------
-    # Top-10 table: most numerous individual observations (for the panel
-    # shown below the map in the Streamlit UI).
+    # Table: every observation that has a marker on the map, so the
+    # dataframe and map always reflect the same set of records.
     # ------------------------------------------------------------------
     df_geo = pd.DataFrame(geo_records)
     if "howMany" in df_geo.columns:
@@ -191,7 +191,6 @@ def create_sightings_map(observations_file: str = "") -> str:
         df_geo[list(available.keys())]
         .rename(columns=available)
         .sort_values("Count", ascending=False)
-        .head(10)
         .reset_index(drop=True)
     )
 
@@ -213,7 +212,7 @@ def create_sightings_map(observations_file: str = "") -> str:
 @tool
 def create_historical_chart(
     observations_file: str = "",
-    chart_type: Literal["bar", "line"] = "bar",
+    chart_type: Literal["bar", "line", "scatter", "heatmap", "facet_bar", "box"] = "bar",
     top_n_species: int = 15,
 ) -> str:
     """Build a chart showing the number of observations per species.
@@ -225,10 +224,17 @@ def create_historical_chart(
         observations_file: Path to the JSON file returned by an eBird data tool
             (included in the tool's output as "JSON file: /path/to/file.json").
             Leave empty to use the session cache automatically.
-        chart_type: 'bar' (default) for a bar chart ranked by count,
-            or 'line' for a time-series line chart by date.
+        chart_type: Chart style to render.
+            - 'bar'       (default) — horizontal bar chart ranked by total count.
+            - 'line'      — time-series line chart per species (requires 'obsDt').
+            - 'scatter'   — scatter plot of count over time with OLS regression
+                            lines per species (requires 'obsDt').
+            - 'heatmap'   — species × date heatmap showing observation intensity
+                            (requires 'obsDt').
+            - 'facet_bar' — bar charts faceted by location (up to 6 locations,
+                            requires 'locName').
+            - 'box'       — box plot showing the count distribution per species.
         top_n_species: Show only the top N most-observed species (default 15).
-            Ignored for the 'line' chart type.
 
     Returns:
         A short confirmation string, e.g. "Chart created with 120 records."
@@ -270,13 +276,13 @@ def create_historical_chart(
             margin={"t": 50, "b": 120},
         )
 
-    else:  # line
+    elif chart_type == "line":
         if "obsDt" not in df.columns:
             raise ToolException(
                 "Observation records are missing the 'obsDt' field required "
                 "for a time-series chart. Try chart_type='bar' instead."
             )
-        df["date"] = pd.to_datetime(df["obsDt"]).dt.date
+        df["date"] = pd.to_datetime(df["obsDt"], format="mixed").dt.date
         time_summary = (
             df.groupby(["date", "comName"], as_index=False)["howMany"].sum()
         )
@@ -297,6 +303,129 @@ def create_historical_chart(
             markers=True,
         )
         fig.update_layout(margin={"t": 50, "b": 60})
+
+    elif chart_type == "scatter":
+        if "obsDt" not in df.columns:
+            raise ToolException(
+                "Observation records are missing the 'obsDt' field required "
+                "for a scatter/regression chart. Try chart_type='bar' instead."
+            )
+        df["date"] = pd.to_datetime(df["obsDt"], format="mixed").dt.date
+        top_species = (
+            df.groupby("comName")["howMany"]
+            .sum()
+            .nlargest(top_n_species)
+            .index.tolist()
+        )
+        scatter_df = df[df["comName"].isin(top_species)].copy()
+        scatter_df["date"] = pd.to_datetime(scatter_df["date"])
+        fig = px.scatter(
+            scatter_df,
+            x="date",
+            y="howMany",
+            color="comName",
+            trendline="ols",
+            title=f"Observations with OLS Regression (top {top_n_species} species)",
+            labels={"date": "Date", "howMany": "Count", "comName": "Species"},
+        )
+        fig.update_layout(margin={"t": 50, "b": 60})
+
+    elif chart_type == "heatmap":
+        if "obsDt" not in df.columns:
+            raise ToolException(
+                "Observation records are missing the 'obsDt' field required "
+                "for a heatmap. Try chart_type='bar' instead."
+            )
+        df["date"] = pd.to_datetime(df["obsDt"], format="mixed").dt.date.astype(str)
+        top_species = (
+            df.groupby("comName")["howMany"]
+            .sum()
+            .nlargest(top_n_species)
+            .index.tolist()
+        )
+        heat_df = df[df["comName"].isin(top_species)]
+        pivot = (
+            heat_df.groupby(["comName", "date"])["howMany"]
+            .sum()
+            .unstack(fill_value=0)
+        )
+        import plotly.graph_objects as go
+        fig = go.Figure(data=go.Heatmap(
+            z=pivot.values,
+            x=pivot.columns.tolist(),
+            y=pivot.index.tolist(),
+            colorscale="YlOrRd",
+            hoverongaps=False,
+        ))
+        fig.update_layout(
+            title=f"Observation Heatmap (top {top_n_species} species)",
+            xaxis_title="Date",
+            yaxis_title="Species",
+            margin={"t": 50, "b": 80},
+        )
+
+    elif chart_type == "facet_bar":
+        if "locName" not in df.columns:
+            raise ToolException(
+                "Observation records are missing 'locName' required for a "
+                "facet chart. Try chart_type='bar' instead."
+            )
+        top_species = (
+            df.groupby("comName")["howMany"]
+            .sum()
+            .nlargest(top_n_species)
+            .index.tolist()
+        )
+        facet_df = df[df["comName"].isin(top_species)]
+        top_locs = (
+            facet_df.groupby("locName")["howMany"]
+            .sum()
+            .nlargest(6)
+            .index.tolist()
+        )
+        facet_df = facet_df[facet_df["locName"].isin(top_locs)]
+        summary = facet_df.groupby(["locName", "comName"], as_index=False)["howMany"].sum()
+        fig = px.bar(
+            summary,
+            x="comName",
+            y="howMany",
+            facet_col="locName",
+            facet_col_wrap=2,
+            title=f"Species Counts by Location (top {top_n_species} species, top 6 locations)",
+            labels={"comName": "Species", "howMany": "Count", "locName": "Location"},
+            color="comName",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        fig.update_layout(
+            showlegend=False,
+            margin={"t": 60, "b": 120},
+            height=600,
+        )
+        fig.for_each_xaxis(lambda ax: ax.update(tickangle=-40))
+        fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+
+    elif chart_type == "box":
+        top_species = (
+            df.groupby("comName")["howMany"]
+            .sum()
+            .nlargest(top_n_species)
+            .index.tolist()
+        )
+        box_df = df[df["comName"].isin(top_species)]
+        fig = px.box(
+            box_df,
+            x="comName",
+            y="howMany",
+            title=f"Count Distribution per Species (top {top_n_species})",
+            labels={"comName": "Species", "howMany": "Count"},
+            color="comName",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        fig.update_layout(
+            xaxis_tickangle=-40,
+            showlegend=False,
+            margin={"t": 50, "b": 120},
+        )
 
     VizBuffer["type"] = "chart"
     VizBuffer["data"] = fig.to_dict()

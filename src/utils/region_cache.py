@@ -29,6 +29,8 @@ _CACHE_FILE = _CACHE_DIR / "regions.json"
 
 # All codes accumulated from get_region_list responses (in-memory + on-disk).
 _known_codes: set[str] = set()
+# Parent region codes whose full child list has been fetched from the API.
+_fully_fetched: set[str] = set()
 _cache_loaded: bool = False
 
 # Special codes accepted unconditionally (never returned by region_list).
@@ -66,6 +68,7 @@ def _load() -> None:
         try:
             data = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
             _known_codes.update(data.get("codes", []))
+            _fully_fetched.update(data.get("fully_fetched", []))
         except Exception:
             pass  # corrupt file — start fresh
 
@@ -74,7 +77,13 @@ def _save() -> None:
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         _CACHE_FILE.write_text(
-            json.dumps({"codes": sorted(_known_codes)}, indent=2),
+            json.dumps(
+                {
+                    "codes": sorted(_known_codes),
+                    "fully_fetched": sorted(_fully_fetched),
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
     except Exception:
@@ -85,10 +94,19 @@ def _save() -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def register_codes(codes: list[str]) -> None:
-    """Store a batch of valid region codes returned by a get_region_list call."""
+def register_codes(codes: list[str], parent: str | None = None) -> None:
+    """Store a batch of valid region codes returned by a get_region_list call.
+
+    Args:
+        codes: Region codes to add to the known-codes set.
+        parent: The parent region code whose full child list was just fetched.
+            When supplied the parent is recorded as fully-fetched so future
+            validation can safely reject unknown children.
+    """
     _load()
     _known_codes.update(codes)
+    if parent:
+        _fully_fetched.add(parent.upper())
     _save()
 
 
@@ -123,33 +141,36 @@ def validate_region_code(code: str) -> str | None:
     if code in _ALWAYS_VALID:
         return None
 
-    # --- Tier 2: cache (skip when cache is cold) ---
-    if _known_codes and code not in _known_codes:
-        parts = code.split("-")
-        if len(parts) == 1:
-            # Bare country codes (e.g. 'US') are not returned by get_region_list
-            # and will never be registered in the cache; format check is sufficient.
-            return None
-        if len(parts) == 3:
-            parent = "-".join(parts[:2])
+    # --- Tier 2: cache (only when the parent's full list has been fetched) ---
+    parts = code.split("-")
+    if len(parts) == 1:
+        # Bare country codes are not returned by get_region_list and will never
+        # be in the cache; format check is sufficient.
+        return None
+
+    if len(parts) == 3:
+        parent = "-".join(parts[:2])
+        # Only reject if we fetched the complete subnational2 list for this parent.
+        if parent in _fully_fetched and code not in _known_codes:
             hint = (
                 f"Call get_region_list(region_type='subnational2', "
                 f"parent_region_code='{parent}') to list valid codes for that area."
             )
-        elif len(parts) == 2:
-            parent = parts[0]
+            return (
+                f"'{code}' was not found among known eBird region codes. "
+                f"{hint}"
+            )
+    elif len(parts) == 2:
+        parent = parts[0]
+        # Only reject if we fetched the complete subnational1 list for this parent.
+        if parent in _fully_fetched and code not in _known_codes:
             hint = (
                 f"Call get_region_list(region_type='subnational1', "
                 f"parent_region_code='{parent}') to list valid state/province codes."
             )
-        else:
-            hint = (
-                "Call get_region_list(region_type='country', "
-                "parent_region_code='world') to list valid country codes."
+            return (
+                f"'{code}' was not found among known eBird region codes. "
+                f"{hint}"
             )
-        return (
-            f"'{code}' was not found among known eBird region codes. "
-            f"{hint}"
-        )
 
     return None
