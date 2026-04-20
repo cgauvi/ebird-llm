@@ -99,6 +99,34 @@ HISTORIC_OBS = [
     },
 ]
 
+# Snow Goose sightings near Quebec City — mirrors the fixed LLM response in
+# TestLLMOutputMapConsistency.  Only goose species are present so the
+# "goose-only" assertion must pass.
+QUEBEC_GOOSE_OBS = [
+    {
+        "comName": "Snow Goose",
+        "sciName": "Anser caerulescens",
+        "speciesCode": "snogoo",
+        "howMany": 12,
+        "lat": 46.82,
+        "lng": -71.20,
+        "obsDt": _YESTERDAY.strftime("%Y-%m-%d 07:30"),
+        "locName": "Beauport Shore",
+        "locId": "L500",
+    },
+    {
+        "comName": "Snow Goose",
+        "sciName": "Anser caerulescens",
+        "speciesCode": "snogoo",
+        "howMany": 5,
+        "lat": 46.80,
+        "lng": -71.22,
+        "obsDt": _YESTERDAY.strftime("%Y-%m-%d 08:15"),
+        "locName": "Cap Tourmente",
+        "locId": "L501",
+    },
+]
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -453,3 +481,116 @@ class TestCountConsistency:
             f"Expected 1 aggregated species bar but got {len(chart_species)}: {chart_species}."
         )
         assert RECENT_OBS[0]["comName"] in chart_species
+
+
+# ---------------------------------------------------------------------------
+# 4. LLM output ↔ map/dataframe consistency
+#    The species described in the LLM response must match what was actually
+#    rendered in the VizBuffer map table and dataframe.
+#
+#    Scenario: the LLM says —
+#      "Here's a map of the recent Snow Goose sightings (the most common
+#       'goose' species) within a 25 km radius of Quebec City
+#       (lat 46.8139, lng −71.208)."
+#    The API returned only Snow Goose records, so the map must reflect that.
+# ---------------------------------------------------------------------------
+
+
+class TestLLMOutputMapConsistency:
+    """Species named in the LLM response must agree with VizBuffer content.
+
+    None of these tests call a real LLM or the real eBird API.  The LLM
+    response is a fixed string; the API is mocked.
+    """
+
+    # Fixed LLM output — no real LLM is invoked.
+    _LLM_RESPONSE = (
+        "Here's a map of the recent Snow Goose sightings (the most common "
+        '"goose" species) within a 25 km radius of Quebec City '
+        "(lat 46.8139, lng \u221271.208)."
+    )
+
+    def test_llm_claimed_species_present_in_map_table(self, mock_client):
+        """Species explicitly named in the LLM response must appear in VizBuffer['table']."""
+        mock_client.recent_observations_by_location.return_value = QUEBEC_GOOSE_OBS
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 46.8139, "lng": -71.208, "dist_km": 25}
+        )
+        create_sightings_map.invoke({})
+
+        table_species = _map_species(VizBuffer["table"])
+        assert "Snow Goose" in table_species, (
+            f"LLM claimed 'Snow Goose' sightings but VizBuffer table contains: {table_species}"
+        )
+
+    def test_map_table_contains_only_goose_species(self, mock_client):
+        """When the LLM describes goose sightings, the dataframe must contain
+        only goose species — no incidental non-goose records."""
+        mock_client.recent_observations_by_location.return_value = QUEBEC_GOOSE_OBS
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 46.8139, "lng": -71.208, "dist_km": 25}
+        )
+        create_sightings_map.invoke({})
+
+        non_goose = [
+            row["Species"]
+            for row in VizBuffer["table"]
+            if "goose" not in row["Species"].lower()
+        ]
+        assert not non_goose, (
+            "LLM described goose sightings but map table contains non-goose "
+            f"species: {non_goose}"
+        )
+
+    def test_no_species_fabricated_beyond_api_response(self, mock_client):
+        """The map table must not contain species absent from the API response."""
+        mock_client.recent_observations_by_location.return_value = QUEBEC_GOOSE_OBS
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 46.8139, "lng": -71.208, "dist_km": 25}
+        )
+        create_sightings_map.invoke({})
+
+        api_species = {o["comName"] for o in QUEBEC_GOOSE_OBS}
+        table_species = _map_species(VizBuffer["table"])
+        fabricated = table_species - api_species
+        assert not fabricated, (
+            f"Map table contains species not returned by the API: {fabricated}"
+        )
+
+    def test_mixed_response_non_goose_records_violate_goose_only_assertion(
+        self, mock_client
+    ):
+        """Guard test: if the API returns non-goose records alongside geese, the
+        goose-only check must fail — confirming the assertion is meaningful."""
+        mixed_obs = QUEBEC_GOOSE_OBS + [
+            {
+                "comName": "American Robin",
+                "sciName": "Turdus migratorius",
+                "speciesCode": "amerob",
+                "howMany": 1,
+                "lat": 46.81,
+                "lng": -71.21,
+                "obsDt": _YESTERDAY.strftime("%Y-%m-%d 09:00"),
+                "locName": "Quebec City Park",
+                "locId": "L502",
+            }
+        ]
+        mock_client.recent_observations_by_location.return_value = mixed_obs
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 46.8139, "lng": -71.208, "dist_km": 25}
+        )
+        create_sightings_map.invoke({})
+
+        non_goose = [
+            row["Species"]
+            for row in VizBuffer["table"]
+            if "goose" not in row["Species"].lower()
+        ]
+        assert non_goose, (
+            "Expected non-goose species in mixed data but found none — "
+            "the goose-only assertion guard is broken."
+        )
