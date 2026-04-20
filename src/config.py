@@ -64,7 +64,7 @@ MODELS: dict[str, ModelConfig] = {
     ),
 }
 
-DEFAULT_MODEL_ALIAS = "qwen2.5-72b"
+DEFAULT_MODEL_ALIAS = "gpt-oss-20b"
 
 
 def resolve_model(hf_model_id: str | None = None) -> tuple[str, ModelConfig | None]:
