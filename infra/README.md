@@ -144,6 +144,7 @@ elasticloadbalancing:DescribeListenerAttributes
 
 cognito-idp:DescribeUserPool
 cognito-idp:DescribeUserPoolClient
+cognito-idp:GetUserPoolMfaConfig
 cognito-idp:CreateUserPool
 cognito-idp:UpdateUserPool
 cognito-idp:DeleteUserPool
@@ -156,6 +157,7 @@ cognito-idp:UntagResource
 
 dynamodb:CreateTable
 dynamodb:DeleteTable
+dynamodb:DescribeContinuousBackups
 dynamodb:DescribeTable
 dynamodb:UpdateTable
 dynamodb:ListTagsOfResource
@@ -329,6 +331,8 @@ aws logs tail /ecs/ebird-llm-prod --follow --region us-east-2
 # Dev
 terraform init -backend-config=backend-dev.hcl -reconfigure
 terraform destroy -var-file=dev.tfvars
+dynamodb:DescribeContinuousBackups
+dynamodb:DescribeTable
 
 # Prod
 terraform init -backend-config=backend-prod.hcl -reconfigure
@@ -336,6 +340,8 @@ terraform destroy -var-file=prod.tfvars
 ```
 
 ---
+cognito-idp:GetUserPoolMfaConfig
+cognito-idp:UpdateUserPoolClient
 
 ## Adding HTTPS
 

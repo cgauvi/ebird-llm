@@ -319,6 +319,7 @@ data "aws_iam_policy_document" "github_deploy" {
       "cognito-idp:CreateUserPoolClient",
       "cognito-idp:DeleteUserPool",
       "cognito-idp:DeleteUserPoolClient",
+      "cognito-idp:GetUserPoolMfaConfig",
       "cognito-idp:DescribeUserPool",
       "cognito-idp:DescribeUserPoolClient",
       "cognito-idp:ListTagsForResource",
@@ -338,6 +339,7 @@ data "aws_iam_policy_document" "github_deploy" {
     actions = [
       "dynamodb:CreateTable",
       "dynamodb:DeleteTable",
+      "dynamodb:DescribeContinuousBackups",
       "dynamodb:DescribeTable",
       "dynamodb:ListTagsOfResource",
       "dynamodb:TagResource",
