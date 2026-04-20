@@ -5,9 +5,9 @@ variable "aws_region" {
 }
 
 variable "aws_profile" {
-  description = "AWS CLI named profile to use for authentication"
+  description = "AWS CLI named profile to use for authentication (local use only)"
   type        = string
-  default     = "default"
+  default     = ""
 }
 
 variable "project_name" {

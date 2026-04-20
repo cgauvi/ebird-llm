@@ -17,8 +17,12 @@ terraform {
 }
 
 provider "aws" {
-  region  = var.aws_region
-  profile = var.aws_profile
+  region = var.aws_region
+  # profile is intentionally omitted: in CI, credentials are supplied via
+  # environment variables (AWS_ACCESS_KEY_ID / OIDC). For local runs, set
+  # AWS_PROFILE in your shell or pass -var="aws_profile=myprofile" and
+  # uncomment the line below.
+  # profile = var.aws_profile
 
   default_tags {
     tags = {
