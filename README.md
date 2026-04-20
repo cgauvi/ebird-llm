@@ -140,15 +140,19 @@ The app opens at `http://localhost:8501`.
 Build and run the production image locally, using the same `.env` file for API keys:
 
 ```bash
-docker build --target runtime -t ebird-llm .
-docker run --rm -p 8501:8501 --env-file .env ebird-llm
+docker build --target runtime -t ebird-llm-local .
+docker run --rm -p 8501:8501 --env-file .env --no-healthcheck --privileged ebird-llm-local
 ```
+
+> `--privileged` is required for local dev on systems where the cgroup v1 pids
+> subsystem is not fully mounted (common on Ubuntu with newer kernels or WSL2).
+> It is not used in production — ECS Fargate manages resource limits separately.
 
 Run the test suite inside Docker (uses the same deps as production):
 
 ```bash
-docker build --target test -t ebird-llm:test .
-docker run --rm --env-file .env ebird-llm:test
+docker build --target test -t ebird-llm-local:test .
+docker run --rm --env-file .env --no-healthcheck --privileged ebird-llm-local:test
 ```
 
 The app opens at `http://localhost:8501`.

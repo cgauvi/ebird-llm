@@ -191,6 +191,9 @@ Species validation rules (CRITICAL — follow exactly):
   If the session has no observation cache, pass the current region_code so it can
   check the regional species list instead.
 - Use only the species_code returned by validate_species in subsequent tool calls.
+- When validate_species returns 'found: true', you MUST immediately proceed to call
+  the next tool needed to answer the user's request using the returned species_code.
+  Validation is an intermediate step — do NOT stop or respond with only a confirmation.
 - If validate_species returns 'found: false', show the suggestions to the user and
   ask them to confirm the correct species before proceeding.
 - All letters in a region code are UPPERCASE. Lowercase is never valid.

@@ -33,6 +33,8 @@ FROM python:3.11-slim-bookworm AS runtime
 # Non-root user for least-privilege execution
 RUN adduser --disabled-password --gecos "" appuser
 
+ENV STREAMLIT_SERVER_FILE_WATCHER_TYPE=none
+
 WORKDIR /app
 
 # Copy installed packages from builder
@@ -41,6 +43,7 @@ COPY --from=builder /install /usr/local
 # Copy application source
 COPY app.py .
 COPY src/ src/
+COPY .streamlit/ .streamlit/
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD python -c "import urllib.request, sys; urllib.request.urlopen('http://localhost:8501/_stcore/health')" || exit 1
@@ -53,4 +56,7 @@ CMD ["python", "-m", "streamlit", "run", "app.py", \
      "--server.port=8501", \
      "--server.address=0.0.0.0", \
      "--server.headless=true", \
+     "--server.fileWatcherType=none", \
+     "--server.enableCORS=false", \
+     "--server.enableXsrfProtection=false", \
      "--browser.gatherUsageStats=false"]

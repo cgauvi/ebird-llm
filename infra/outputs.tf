@@ -54,7 +54,7 @@ output "docker_push_commands" {
       | docker login --username AWS --password-stdin ${aws_ecr_repository.app.repository_url}
 
     # 2. Build (from project root) and push
-    docker build -t ${aws_ecr_repository.app.repository_url}:${var.image_tag} .
+    docker build --target runtime -t ${aws_ecr_repository.app.repository_url}:${var.image_tag} .
     docker push ${aws_ecr_repository.app.repository_url}:${var.image_tag}
 
     # 3. Force a new ECS deployment to pull the latest image
