@@ -14,6 +14,7 @@ Layout
 
 import importlib
 import os
+import uuid
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -88,6 +89,11 @@ _log_threshold = 1   # default: INFO
 # Session state initialisation
 # ---------------------------------------------------------------------------
 
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.user_email = None
+    st.session_state.session_id = None
+
 if "messages" not in st.session_state:
     st.session_state.messages = []  # list[dict(role, content)]
 
@@ -105,12 +111,97 @@ if "viz_snapshot" not in st.session_state:
     os.environ.setdefault("HF_MODEL_ID", DEFAULT_MODEL_ALIAS)
 
 # ---------------------------------------------------------------------------
+# Authentication gate
+# ---------------------------------------------------------------------------
+
+from src.utils.auth import is_configured as auth_configured  # noqa: E402
+
+if auth_configured() and not st.session_state.authenticated:
+    from src.utils import auth  # noqa: E402
+
+    st.title("🐦 eBird Birding Assistant")
+    login_tab, signup_tab, confirm_tab = st.tabs(["Sign In", "Sign Up", "Verify Email"])
+
+    with login_tab:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign In", use_container_width=True)
+            if submitted and email and password:
+                result = auth.sign_in(email, password)
+                if result["success"]:
+                    st.session_state.authenticated = True
+                    st.session_state.user_email = result["email"]
+                    st.session_state.session_id = str(uuid.uuid4())
+                    # Track session start
+                    try:
+                        from src.utils.usage_tracker import increment_session
+                        increment_session(result["email"])
+                    except Exception:
+                        pass
+                    st.rerun()
+                else:
+                    st.error(result["error"])
+
+    with signup_tab:
+        with st.form("signup_form"):
+            new_email = st.text_input("Email", key="signup_email")
+            new_password = st.text_input("Password", type="password", key="signup_pw")
+            st.caption("Min 8 chars, uppercase, lowercase, number, and symbol required.")
+            signed_up = st.form_submit_button("Create Account", use_container_width=True)
+            if signed_up and new_email and new_password:
+                result = auth.sign_up(new_email, new_password)
+                if result["success"]:
+                    st.success("Account created! Check your email for a verification code.")
+                else:
+                    st.error(result["error"])
+
+    with confirm_tab:
+        with st.form("confirm_form"):
+            conf_email = st.text_input("Email", key="conf_email")
+            conf_code = st.text_input("Verification Code")
+            confirmed = st.form_submit_button("Verify", use_container_width=True)
+            if confirmed and conf_email and conf_code:
+                result = auth.confirm_sign_up(conf_email, conf_code)
+                if result["success"]:
+                    st.success("Email verified! You can now sign in.")
+                else:
+                    st.error(result["error"])
+        if st.button("Resend code", key="btn_resend"):
+            if conf_email:
+                auth.resend_confirmation_code(conf_email)
+                st.info("Verification code re-sent.")
+
+    st.stop()
+
+# ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
     st.title("🐦 eBird Assistant")
     st.caption("Powered by LangChain · HuggingFace · eBird API v2")
+
+    # --- Authenticated user info & sign-out ---
+    if st.session_state.authenticated:
+        st.caption(f"Signed in as **{st.session_state.user_email}**")
+        if st.button("🚪 Sign Out", use_container_width=True, key="btn_sign_out"):
+            st.session_state.authenticated = False
+            st.session_state.user_email = None
+            st.session_state.session_id = None
+            st.session_state.messages = []
+            st.rerun()
+
+        # --- Monthly usage display ---
+        try:
+            from src.utils.usage_tracker import get_usage, MAX_SESSIONS_PER_MONTH, MAX_PROMPTS_PER_MONTH
+            _usage = get_usage(st.session_state.user_email)
+            st.caption(
+                f"This month: {_usage['session_count']}/{MAX_SESSIONS_PER_MONTH} sessions · "
+                f"{_usage['prompt_count']}/{MAX_PROMPTS_PER_MONTH} prompts"
+            )
+        except Exception:
+            pass
 
     st.divider()
 
@@ -125,6 +216,19 @@ with st.sidebar:
         st.session_state.viz_snapshot = {"type": None, "data": None, "title": None, "table": None}
         clear_log_buffer()
         st.session_state.log_entries = []
+        # Track new session
+        if st.session_state.authenticated:
+            st.session_state.session_id = str(uuid.uuid4())
+            try:
+                from src.utils.usage_tracker import increment_session
+                result = increment_session(st.session_state.user_email)
+                if not result["allowed"]:
+                    st.warning(
+                        f"You've reached the **{result['limit']} session/month** limit. "
+                        "Please try again next month."
+                    )
+            except Exception:
+                pass
         # Clear agent memory without re-importing to avoid re-building the LLM
         try:
             import src.agent as _agent_mod
@@ -276,6 +380,26 @@ with chat_col:
     if user_input:
         import src.utils.state as _state
         import src.agent as _agent_mod
+
+        # --- Prompt-level rate limiting ---
+        _prompt_allowed = True
+        if st.session_state.authenticated:
+            try:
+                from src.utils.usage_tracker import increment_prompt
+                _prompt_result = increment_prompt(st.session_state.user_email)
+                if not _prompt_result["allowed"]:
+                    _prompt_allowed = False
+                    st.warning(
+                        f"You've reached the **{_prompt_result['limit']} prompt/month** limit. "
+                        "Please try again next month.",
+                        icon="🛑",
+                    )
+            except Exception:
+                pass  # fail open
+
+        if not _prompt_allowed:
+            st.stop()
+
         _state.clear_viz_buffer()
         # Drop stale table immediately so it doesn't persist during intermediate
         # re-renders while the agent is working on the new map.

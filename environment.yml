@@ -33,3 +33,5 @@ dependencies:
       - python-dotenv>=1.0.0
       # Validation
       - pydantic>=2.7.0
+      # AWS (Cognito auth + DynamoDB usage tracking)
+      - boto3>=1.34.0

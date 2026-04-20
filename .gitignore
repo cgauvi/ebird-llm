@@ -35,6 +35,9 @@ build/
 # Streamlit cache
 .streamlit/
 
+# deepeval
+.deepeval/
+
 # IDE
 .vscode/
 .idea/
