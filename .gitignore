@@ -13,7 +13,9 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-*.tfvars
+# *.tfvars excluded — non-secret env config (dev.tfvars, prod.tfvars) is committed
+# To ignore a specific secrets file, add it explicitly e.g.: secrets.auto.tfvars
+*.auto.tfvars
 *.tfvars.json
 .terraformrc
 terraform.rc
