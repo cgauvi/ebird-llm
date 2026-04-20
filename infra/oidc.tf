@@ -135,6 +135,7 @@ data "aws_iam_policy_document" "github_deploy" {
       "ecr:GetRepositoryPolicy",
       "ecr:InitiateLayerUpload",
       "ecr:ListImages",
+      "ecr:ListTagsForResource",
       "ecr:PutImage",
       "ecr:PutImageScanningConfiguration",
       "ecr:PutImageTagMutability",
@@ -225,6 +226,7 @@ data "aws_iam_policy_document" "github_deploy" {
       "elasticloadbalancing:DeleteListener",
       "elasticloadbalancing:DeleteLoadBalancer",
       "elasticloadbalancing:DeleteTargetGroup",
+      "elasticloadbalancing:DescribeListenerAttributes",
       "elasticloadbalancing:DescribeListeners",
       "elasticloadbalancing:DescribeLoadBalancerAttributes",
       "elasticloadbalancing:DescribeLoadBalancers",
@@ -266,6 +268,15 @@ data "aws_iam_policy_document" "github_deploy" {
   }
 
   statement {
+    sid    = "IAMOIDC"
+    effect = "Allow"
+    actions = ["iam:GetOpenIDConnectProvider"]
+    resources = [
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com",
+    ]
+  }
+
+  statement {
     sid    = "IAMPassRole"
     effect = "Allow"
     actions = ["iam:PassRole"]
@@ -289,6 +300,53 @@ data "aws_iam_policy_document" "github_deploy" {
     ]
     resources = [
       "arn:aws:ssm:*:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}-*",
+      "arn:aws:ssm:*:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}-*/*",
+    ]
+  }
+
+  statement {
+    sid    = "SSMDescribeParameters"
+    effect = "Allow"
+    actions = ["ssm:DescribeParameters"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "Cognito"
+    effect = "Allow"
+    actions = [
+      "cognito-idp:CreateUserPool",
+      "cognito-idp:CreateUserPoolClient",
+      "cognito-idp:DeleteUserPool",
+      "cognito-idp:DeleteUserPoolClient",
+      "cognito-idp:DescribeUserPool",
+      "cognito-idp:DescribeUserPoolClient",
+      "cognito-idp:ListTagsForResource",
+      "cognito-idp:TagResource",
+      "cognito-idp:UntagResource",
+      "cognito-idp:UpdateUserPool",
+      "cognito-idp:UpdateUserPoolClient",
+    ]
+    resources = [
+      "arn:aws:cognito-idp:*:${data.aws_caller_identity.current.account_id}:userpool/*",
+    ]
+  }
+
+  statement {
+    sid    = "DynamoAppTables"
+    effect = "Allow"
+    actions = [
+      "dynamodb:CreateTable",
+      "dynamodb:DeleteTable",
+      "dynamodb:DescribeTable",
+      "dynamodb:ListTagsOfResource",
+      "dynamodb:TagResource",
+      "dynamodb:UntagResource",
+      "dynamodb:UpdateTable",
+    ]
+    resources = [
+      "arn:aws:dynamodb:*:${data.aws_caller_identity.current.account_id}:table/${var.project_name}-*",
+      "arn:aws:dynamodb:*:${data.aws_caller_identity.current.account_id}:table/${var.project_name}-*/index/*",
     ]
   }
 

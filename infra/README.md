@@ -109,6 +109,91 @@ terraform output github_deploy_role_arn
 # → GitHub repo → Settings → Secrets → Actions → New secret: AWS_DEPLOY_ROLE_ARN
 ```
 
+This bootstrap is per AWS account and repository, not per environment.
+In the current setup:
+
+- `backend-dev.hcl` and `backend-prod.hcl` use the same S3 state bucket and
+  DynamoDB lock table, with different state keys
+- `develop`, `main`, and `master` all assume the same
+  `ebird-llm-github-deploy` role
+- Dev and prod are separated by different `.tfvars` values and different
+  backend state files, not by separate GitHub OIDC roles
+
+That means you do **not** need a second OIDC bootstrap just because you are
+deploying prod. You only need a separate bootstrap if you later move prod to a
+different AWS account or decide to use a distinct prod deploy role.
+
+### If CI deploy fails with AccessDenied during terraform plan/apply
+
+If the GitHub Actions deploy workflow starts but Terraform fails while reading
+existing AWS resources, the `ebird-llm-github-deploy` role is missing refresh
+permissions. This is an IAM policy issue, not a `workflow_run` issue.
+
+Typical symptom:
+
+- The deploy workflow runs after `Unit Tests` passes
+- `aws-actions/configure-aws-credentials` succeeds
+- `terraform init` succeeds
+- `terraform plan` or `terraform apply` fails with `AccessDenied` on
+  `Describe*`, `Get*`, or `List*` API calls
+
+Minimum additional actions required for the current stack:
+
+```text
+elasticloadbalancing:DescribeListenerAttributes
+
+cognito-idp:DescribeUserPool
+cognito-idp:DescribeUserPoolClient
+cognito-idp:CreateUserPool
+cognito-idp:UpdateUserPool
+cognito-idp:DeleteUserPool
+cognito-idp:CreateUserPoolClient
+cognito-idp:UpdateUserPoolClient
+cognito-idp:DeleteUserPoolClient
+cognito-idp:ListTagsForResource
+cognito-idp:TagResource
+cognito-idp:UntagResource
+
+dynamodb:CreateTable
+dynamodb:DeleteTable
+dynamodb:DescribeTable
+dynamodb:UpdateTable
+dynamodb:ListTagsOfResource
+dynamodb:TagResource
+dynamodb:UntagResource
+
+ecr:ListTagsForResource
+
+iam:GetOpenIDConnectProvider
+
+ssm:DescribeParameters
+```
+
+Notes:
+
+- `ssm:DescribeParameters` should be granted on `*`. AWS does not evaluate that
+  action against individual parameter ARNs.
+- The current SSM parameters are named with a leading slash, for example
+  `/ebird-llm-dev/EBIRD_API_KEY`. The matching ARN pattern must therefore look
+  like `arn:aws:ssm:*:<account-id>:parameter/ebird-llm-*`, not a pattern that
+  assumes the slash is preserved after `parameter/`.
+- If the deploy role cannot yet manage its own policy, run a one-time local
+  Terraform apply with an admin-capable AWS identity targeting the OIDC role
+  resources first.
+
+Bootstrap command for that one-time fix:
+
+```bash
+cd infra
+terraform init -backend-config=backend-dev.hcl
+terraform apply -var-file=dev.tfvars \
+  -target=aws_iam_openid_connect_provider.github \
+  -target=aws_iam_role.github_deploy \
+  -target=aws_iam_role_policy.github_deploy
+```
+
+After that bootstrap, normal CI/CD can update the rest of the stack.
+
 ---
 
 ## Manual Deployment
@@ -130,6 +215,12 @@ cd infra
 terraform init -backend-config=backend-prod.hcl -reconfigure
 terraform apply -var-file=prod.tfvars
 ```
+
+If prod has never been deployed before, this first full apply is the prod
+bootstrap of the infrastructure itself. It creates the prod-namespaced
+resources such as `ebird-llm-prod`, `ebird-llm-prod-users`, and the prod SSM
+parameters. It does not require a separate OIDC bootstrap as long as the
+shared GitHub deploy role already has the correct permissions.
 
 > Always pass `-reconfigure` when switching between environments to avoid
 > Terraform trying to migrate state between backends.
