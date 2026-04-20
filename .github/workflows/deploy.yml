@@ -5,7 +5,7 @@ on:
   # Using workflow_run ensures tests always gate deploys, even on direct pushes.
   workflow_run:
     workflows: ["Unit Tests"]
-    branches: ["master", "develop"]
+    branches: ["master", "main", "develop"]
     types: [completed]
 
 jobs:
