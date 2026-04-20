@@ -35,3 +35,5 @@ dependencies:
       - pydantic>=2.7.0
       # AWS (Cognito auth + DynamoDB usage tracking)
       - boto3>=1.34.0
+      # Versioning / changelog
+      - commitizen>=4.0.0

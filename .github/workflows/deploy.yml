@@ -33,16 +33,37 @@ jobs:
         run: |
           BRANCH="${{ github.event.workflow_run.head_branch }}"
           if [[ "$BRANCH" == "master" ]]; then
-            echo "TF_ENV=prod"            >> "$GITHUB_ENV"
+            echo "TF_ENV=prod"                   >> "$GITHUB_ENV"
             echo "BACKEND_FILE=backend-prod.hcl" >> "$GITHUB_ENV"
-            echo "TFVARS_FILE=prod.tfvars"       >> "$GITHUB_ENV"
+            echo "TFVARS_FILE=prod.tfvars"        >> "$GITHUB_ENV"
+            echo "VPC_CIDR=10.1.0.0/16"          >> "$GITHUB_ENV"
+            echo "TASK_CPU=1024"                 >> "$GITHUB_ENV"
+            echo "TASK_MEMORY=2048"              >> "$GITHUB_ENV"
+            echo "DESIRED_COUNT=1"               >> "$GITHUB_ENV"
           else
-            echo "TF_ENV=dev"             >> "$GITHUB_ENV"
+            echo "TF_ENV=dev"                    >> "$GITHUB_ENV"
             echo "BACKEND_FILE=backend-dev.hcl"  >> "$GITHUB_ENV"
-            echo "TFVARS_FILE=dev.tfvars"        >> "$GITHUB_ENV"
+            echo "TFVARS_FILE=dev.tfvars"         >> "$GITHUB_ENV"
+            echo "VPC_CIDR=10.0.0.0/16"          >> "$GITHUB_ENV"
+            echo "TASK_CPU=512"                  >> "$GITHUB_ENV"
+            echo "TASK_MEMORY=1024"              >> "$GITHUB_ENV"
+            echo "DESIRED_COUNT=1"               >> "$GITHUB_ENV"
           fi
           # Use the short SHA as the image tag for traceability
           echo "IMAGE_TAG=$(echo '${{ github.event.workflow_run.head_sha }}' | cut -c1-7)" >> "$GITHUB_ENV"
+
+      # ── Generate tfvars file (not committed — built from workflow values) ──
+      - name: Generate tfvars
+        working-directory: infra
+        run: |
+          cat > "${{ env.TFVARS_FILE }}" <<EOF
+          environment   = "${{ env.TF_ENV }}"
+          vpc_cidr      = "${{ env.VPC_CIDR }}"
+          task_cpu      = ${{ env.TASK_CPU }}
+          task_memory   = ${{ env.TASK_MEMORY }}
+          desired_count = ${{ env.DESIRED_COUNT }}
+          image_tag     = "${{ env.IMAGE_TAG }}"
+          EOF
 
       # ── AWS authentication (OIDC — no long-lived credentials stored) ───────
       - name: Configure AWS credentials
@@ -87,5 +108,4 @@ jobs:
         working-directory: infra
         run: |
           terraform apply -auto-approve \
-            -var-file="${{ env.TFVARS_FILE }}" \
-            -var="image_tag=${{ env.IMAGE_TAG }}"
+            -var-file="${{ env.TFVARS_FILE }}"
