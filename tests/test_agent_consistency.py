@@ -21,6 +21,7 @@ assert that VizBuffer ends up in a state consistent with that sequence.
 import datetime
 import json
 import re
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,7 +35,7 @@ from src.tools.ebird_tools import (
     get_recent_observations_by_region,
 )
 from src.tools.viz_tools import create_historical_chart, create_sightings_map
-from src.utils.state import VizBuffer, clear_viz_buffer
+from src.utils.state import VizBuffer, clear_viz_buffer, get_last_obs_file
 
 # ---------------------------------------------------------------------------
 # Fixed test dates so assertions are deterministic
@@ -108,14 +109,18 @@ def reset_state():
     """Reset the module-level eBird client, region cache, and VizBuffer."""
     ebird_tools_module._client = None
     original_codes = region_cache_module._known_codes.copy()
+    original_fetched = region_cache_module._fully_fetched.copy()
     original_loaded = region_cache_module._cache_loaded
     region_cache_module._known_codes.clear()
+    region_cache_module._fully_fetched.clear()
     region_cache_module._cache_loaded = True  # skip disk load
     clear_viz_buffer()
     yield
     ebird_tools_module._client = None
     region_cache_module._known_codes.clear()
     region_cache_module._known_codes.update(original_codes)
+    region_cache_module._fully_fetched.clear()
+    region_cache_module._fully_fetched.update(original_fetched)
     region_cache_module._cache_loaded = original_loaded
     clear_viz_buffer()
 
@@ -201,7 +206,7 @@ class TestDataPipelineIntegrity:
         mock_client.recent_observations_by_location.return_value = RECENT_OBS
 
         obs_json = get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
-        create_sightings_map.invoke({"observations_json": obs_json})
+        create_sightings_map.invoke({})
 
         assert _map_species(VizBuffer["table"]) == {o["comName"] for o in RECENT_OBS}
 
@@ -210,7 +215,7 @@ class TestDataPipelineIntegrity:
         mock_client.recent_observations_by_location.return_value = RECENT_OBS
 
         obs_json = get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
-        create_sightings_map.invoke({"observations_json": obs_json})
+        create_sightings_map.invoke({})
 
         assert len(VizBuffer["table"]) <= len(RECENT_OBS)
 
@@ -219,7 +224,7 @@ class TestDataPipelineIntegrity:
         mock_client.recent_observations_by_region.return_value = RECENT_OBS
 
         obs_json = get_recent_observations_by_region.invoke({"region_code": "US-NY"})
-        result = create_historical_chart.invoke({"observations_json": obs_json})
+        result = create_historical_chart.invoke({})
 
         chart_species = _chart_species(VizBuffer["data"])
         api_species = {o["comName"] for o in RECENT_OBS}
@@ -232,7 +237,7 @@ class TestDataPipelineIntegrity:
         obs_json = get_historic_observations.invoke(
             {"region_code": "US-MA", "year": 2024, "month": 5, "day": 1}
         )
-        create_sightings_map.invoke({"observations_json": obs_json})
+        create_sightings_map.invoke({})
 
         assert _map_species(VizBuffer["table"]) == {o["comName"] for o in HISTORIC_OBS}
 
@@ -243,35 +248,27 @@ class TestDataPipelineIntegrity:
         obs_json = get_historic_observations.invoke(
             {"region_code": "US-MA", "year": 2024, "month": 5, "day": 1}
         )
-        create_historical_chart.invoke({"observations_json": obs_json})
+        create_historical_chart.invoke({})
 
         chart_species = _chart_species(VizBuffer["data"])
         api_species = {o["comName"] for o in HISTORIC_OBS}
         assert api_species == chart_species
 
     def test_viz_tool_receives_unmodified_ebird_json(self, mock_client):
-        """The JSON the viz tool receives must decode to the exact API response."""
+        """The JSON written to the temp file by the eBird tool must match the API response."""
         mock_client.recent_observations_by_region.return_value = RECENT_OBS
 
-        captured: dict = {}
+        get_recent_observations_by_region.invoke({"region_code": "US-NY"})
 
-        import src.tools.viz_tools as viz_module
-        original_parse = viz_module._parse_obs
-
-        def capturing_parse(obs_json: str) -> list:
-            captured["obs_json"] = obs_json
-            return original_parse(obs_json)
-
-        with patch("src.tools.viz_tools._parse_obs", side_effect=capturing_parse):
-            obs_json = get_recent_observations_by_region.invoke({"region_code": "US-NY"})
-            create_sightings_map.invoke({"observations_json": obs_json})
-
-        assert captured["obs_json"] == obs_json, (
-            "observations_json passed to viz tool differs from the eBird tool output."
+        obs_file = get_last_obs_file()
+        assert obs_file is not None, "Expected _return_obs to set a last-obs file path."
+        saved = json.loads(Path(obs_file).read_text(encoding="utf-8"))
+        assert saved == RECENT_OBS, (
+            "Observations saved to temp file do not match the original API response."
         )
-        assert json.loads(captured["obs_json"]) == RECENT_OBS, (
-            "Decoded observations_json does not match the original API response."
-        )
+
+        create_sightings_map.invoke({})
+        assert _map_species(VizBuffer["table"]) == {o["comName"] for o in RECENT_OBS}
 
     def test_notable_obs_to_map_species_match(self, mock_client):
         """Notable (rare) observations flow correctly to the map."""
@@ -280,7 +277,7 @@ class TestDataPipelineIntegrity:
         obs_json = get_notable_observations_by_location.invoke(
             {"lat": 40.78, "lng": -73.97}
         )
-        create_sightings_map.invoke({"observations_json": obs_json})
+        create_sightings_map.invoke({})
 
         assert _map_species(VizBuffer["table"]) == {o["comName"] for o in RECENT_OBS}
 
@@ -302,7 +299,7 @@ class TestDateConsistency:
         obs_json = get_recent_observations_by_location.invoke(
             {"lat": 40.78, "lng": -73.97, "days_back": days_back}
         )
-        create_sightings_map.invoke({"observations_json": obs_json})
+        create_sightings_map.invoke({})
 
         assert _vizbuffer_dates_all_within(days_back), (
             f"Map contains dates outside the {days_back}-day recent window. "
@@ -316,7 +313,7 @@ class TestDateConsistency:
         obs_json = get_historic_observations.invoke(
             {"region_code": "US-MA", "year": 2024, "month": 5, "day": 1}
         )
-        create_sightings_map.invoke({"observations_json": obs_json})
+        create_sightings_map.invoke({})
 
         assert _vizbuffer_dates_all_equal(2024, 5, 1), (
             "Map contains dates other than 2024-05-01. "
@@ -330,9 +327,7 @@ class TestDateConsistency:
         obs_json = get_historic_observations.invoke(
             {"region_code": "US-MA", "year": 2024, "month": 5, "day": 1}
         )
-        create_historical_chart.invoke(
-            {"observations_json": obs_json, "chart_type": "line"}
-        )
+        create_historical_chart.invoke({"chart_type": "line"})
 
         # The line chart encodes dates; verify them from VizBuffer data directly.
         traces = VizBuffer["data"].get("data", [])
@@ -354,7 +349,7 @@ class TestDateConsistency:
         obs_json = get_recent_observations_by_region.invoke(
             {"region_code": "US-NY", "days_back": days_back}
         )
-        create_sightings_map.invoke({"observations_json": obs_json})
+        create_sightings_map.invoke({})
 
         assert _vizbuffer_dates_all_within(days_back), (
             f"Map contains dates outside the {days_back}-day recent window."
@@ -367,7 +362,7 @@ class TestDateConsistency:
         mock_client.recent_observations_by_location.return_value = stale_obs
 
         obs_json = get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
-        create_sightings_map.invoke({"observations_json": obs_json})
+        create_sightings_map.invoke({})
 
         # The date check should report the data is NOT within a 30-day window.
         assert not _vizbuffer_dates_all_within(days_back=30), (
@@ -390,7 +385,7 @@ class TestCountConsistency:
         mock_client.recent_observations_by_location.return_value = RECENT_OBS
 
         obs_json = get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
-        result = create_sightings_map.invoke({"observations_json": obs_json})
+        result = create_sightings_map.invoke({})
 
         m = re.search(r"(\d+)\s+sightings?", result, re.IGNORECASE)
         assert m, f"Could not parse sighting count from: {result!r}"
@@ -406,7 +401,7 @@ class TestCountConsistency:
         obs_json = get_historic_observations.invoke(
             {"region_code": "US-MA", "year": 2024, "month": 5, "day": 1}
         )
-        result = create_historical_chart.invoke({"observations_json": obs_json})
+        result = create_historical_chart.invoke({})
 
         count = _chart_record_count(result)
         assert count is not None, f"Could not parse record count from: {result!r}"
@@ -419,7 +414,7 @@ class TestCountConsistency:
         mock_client.recent_observations_by_region.return_value = RECENT_OBS
 
         obs_json = get_recent_observations_by_region.invoke({"region_code": "US-NY"})
-        create_sightings_map.invoke({"observations_json": obs_json})
+        create_sightings_map.invoke({})
 
         assert len(VizBuffer["table"]) <= len(RECENT_OBS)
 
@@ -428,7 +423,7 @@ class TestCountConsistency:
         mock_client.recent_observations_by_region.return_value = RECENT_OBS
 
         obs_json = get_recent_observations_by_region.invoke({"region_code": "US-NY"})
-        create_historical_chart.invoke({"observations_json": obs_json})
+        create_historical_chart.invoke({})
 
         api_species_count = len({o["comName"] for o in RECENT_OBS})
         chart_species_count = len(_chart_species(VizBuffer["data"]))
@@ -444,7 +439,7 @@ class TestCountConsistency:
         mock_client.recent_observations_by_region.return_value = duplicate_species_obs
 
         obs_json = get_recent_observations_by_region.invoke({"region_code": "US-NY"})
-        result = create_historical_chart.invoke({"observations_json": obs_json})
+        result = create_historical_chart.invoke({})
 
         # The return value must report both source records.
         count = _chart_record_count(result)

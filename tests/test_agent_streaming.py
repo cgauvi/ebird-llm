@@ -378,3 +378,147 @@ class TestStreamAgentNonToolJson:
         final = [e for e in events if e["type"] == "final"]
         assert len(final) == 1
         assert final[0]["content"] == response_json
+
+
+# ---------------------------------------------------------------------------
+# _wrap_with_summarizer — retry cap and error-string behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestWrapWithSummarizer:
+    """Unit tests for the _wrap_with_summarizer error-handling and retry cap.
+
+    No LLM or eBird API involved — all tests are deterministic.
+    """
+
+    @pytest.fixture(autouse=True)
+    def reset_error_counts(self):
+        """Ensure a clean error counter before and after every test."""
+        import src.agent as agent_module
+        agent_module._tool_error_counts.clear()
+        yield
+        agent_module._tool_error_counts.clear()
+
+    def _make_tool(self, func) -> "StructuredTool":
+        """Wrap a plain callable in a StructuredTool so _wrap_with_summarizer can process it."""
+        from langchain_core.tools import StructuredTool as ST
+        return ST.from_function(func=func, name=func.__name__, description="test tool")
+
+    def test_success_returns_result(self):
+        """A tool that succeeds returns its value unchanged."""
+        from src.agent import _wrap_with_summarizer
+
+        def my_tool() -> str:
+            return "ok"
+
+        wrapped = _wrap_with_summarizer(self._make_tool(my_tool))
+        assert wrapped.invoke({}) == "ok"
+
+    def test_exception_returned_as_string_not_raised(self):
+        """An exception from the underlying tool must be caught and returned as a
+        string so the LLM can read the error and retry."""
+        from src.agent import _wrap_with_summarizer
+
+        def my_tool() -> str:
+            raise ValueError("bad input")
+
+        wrapped = _wrap_with_summarizer(self._make_tool(my_tool))
+        result = wrapped.invoke({})
+        assert isinstance(result, str)
+        assert "bad input" in result
+
+    def test_error_message_includes_retry_hint(self):
+        """While retries remain the error string should tell the LLM to retry."""
+        from src.agent import _wrap_with_summarizer
+
+        def my_tool() -> str:
+            raise RuntimeError("oops")
+
+        wrapped = _wrap_with_summarizer(self._make_tool(my_tool))
+        result = wrapped.invoke({})
+        assert "retry" in result.lower() or "attempt" in result.lower()
+
+    def test_error_counter_increments_on_each_failure(self):
+        """_tool_error_counts[tool_name] must increase with every failed call."""
+        import src.agent as agent_module
+        from src.agent import _wrap_with_summarizer
+
+        def my_tool() -> str:
+            raise RuntimeError("fail")
+
+        wrapped = _wrap_with_summarizer(self._make_tool(my_tool))
+
+        wrapped.invoke({})
+        assert agent_module._tool_error_counts.get("my_tool", 0) == 1
+        wrapped.invoke({})
+        assert agent_module._tool_error_counts.get("my_tool", 0) == 2
+
+    def test_hard_stop_after_max_retries(self):
+        """Once _MAX_TOOL_RETRIES errors have been recorded the underlying
+        function must NOT be called again and the hard-stop message is returned."""
+        import src.agent as agent_module
+        from src.agent import _MAX_TOOL_RETRIES, _wrap_with_summarizer
+
+        call_count = 0
+
+        def my_tool() -> str:
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("always fails")
+
+        wrapped = _wrap_with_summarizer(self._make_tool(my_tool))
+
+        # Exhaust the retry budget
+        for _ in range(_MAX_TOOL_RETRIES):
+            wrapped.invoke({})
+
+        assert call_count == _MAX_TOOL_RETRIES
+
+        # This call must be blocked — underlying function not invoked
+        result = wrapped.invoke({})
+        assert call_count == _MAX_TOOL_RETRIES  # unchanged
+        assert "Do not call it again" in result or "already failed" in result
+
+    def test_hard_stop_message_names_the_tool(self):
+        """The hard-stop message must include the tool's name."""
+        import src.agent as agent_module
+        from src.agent import _MAX_TOOL_RETRIES, _wrap_with_summarizer
+
+        def my_tool() -> str:
+            raise RuntimeError("fail")
+
+        wrapped = _wrap_with_summarizer(self._make_tool(my_tool))
+
+        for _ in range(_MAX_TOOL_RETRIES):
+            wrapped.invoke({})
+
+        result = wrapped.invoke({})
+        assert "my_tool" in result
+
+    def test_reset_clears_error_counts(self):
+        """_reset_tool_error_counts must zero all counters so the next run
+        starts fresh (simulates a new run_agent / stream_agent call)."""
+        import src.agent as agent_module
+        from src.agent import _reset_tool_error_counts, _wrap_with_summarizer
+
+        def my_tool() -> str:
+            raise RuntimeError("fail")
+
+        wrapped = _wrap_with_summarizer(self._make_tool(my_tool))
+        wrapped.invoke({})
+        assert agent_module._tool_error_counts.get("my_tool", 0) == 1
+
+        _reset_tool_error_counts()
+        assert agent_module._tool_error_counts == {}
+
+    def test_successful_call_does_not_increment_counter(self):
+        """A successful invocation must leave the error counter untouched."""
+        import src.agent as agent_module
+        from src.agent import _wrap_with_summarizer
+
+        def my_tool() -> str:
+            return "fine"
+
+        wrapped = _wrap_with_summarizer(self._make_tool(my_tool))
+        wrapped.invoke({})
+        assert agent_module._tool_error_counts.get("my_tool", 0) == 0

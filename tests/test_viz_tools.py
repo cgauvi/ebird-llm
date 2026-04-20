@@ -224,7 +224,7 @@ class TestCreateHistoricalChart:
 
     def test_non_list_json_raises_tool_exception(self):
         with pytest.raises(ToolException, match="JSON array"):
-            create_historical_chart.invoke({"observations_json": '"just a string"'})
+            create_historical_chart.invoke({"observations_json": '{}'})
 
     def test_missing_com_name_raises_tool_exception(self):
         obs = [{"speciesCode": "amerob", "howMany": 3, "lat": 48.85, "lng": 2.35}]
@@ -250,34 +250,34 @@ class TestCreateHistoricalChart:
 # _parse_obs — JSON cleaning
 # ---------------------------------------------------------------------------
 
-from src.tools.viz_tools import _parse_obs
+from src.tools.viz_tools import parse_observations_json
 
 
 class TestParseObsCleaning:
     def test_parses_clean_json(self):
-        result = _parse_obs(json.dumps(SAMPLE_OBS))
+        result = parse_observations_json(json.dumps(SAMPLE_OBS))
         assert result == SAMPLE_OBS
 
     def test_strips_backslash_escaped_quotes(self):
         """LLMs sometimes emit \" instead of " inside the JSON string."""
         escaped = json.dumps(SAMPLE_OBS).replace('"', '\\"')
-        result = _parse_obs(escaped)
+        result = parse_observations_json(escaped)
         assert result == SAMPLE_OBS
 
     def test_strips_surrounding_whitespace(self):
-        result = _parse_obs("  " + json.dumps(SAMPLE_OBS) + "  ")
+        result = parse_observations_json("  " + json.dumps(SAMPLE_OBS) + "  ")
         assert result == SAMPLE_OBS
 
     def test_unwraps_outer_double_quotes(self):
         """Some models wrap the whole JSON string in an extra pair of quotes."""
         wrapped = '"' + json.dumps(SAMPLE_OBS).replace('"', '\\"') + '"'
-        result = _parse_obs(wrapped)
+        result = parse_observations_json(wrapped)
         assert result == SAMPLE_OBS
 
     def test_raises_on_invalid_json(self):
         with pytest.raises(ToolException, match="not valid JSON"):
-            _parse_obs("not-json")
+            parse_observations_json("not-json")
 
     def test_raises_on_non_list(self):
         with pytest.raises(ToolException, match="JSON array"):
-            _parse_obs(json.dumps({"key": "value"}))
+            parse_observations_json(json.dumps({"key": "value"}))

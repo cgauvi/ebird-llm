@@ -54,13 +54,17 @@ def reset_ebird_client():
     ebird_tools_module._client = None
     # Clear the in-memory region cache so Tier-2 checks are skipped (cold cache).
     original_codes = region_cache_module._known_codes.copy()
+    original_fetched = region_cache_module._fully_fetched.copy()
     original_loaded = region_cache_module._cache_loaded
     region_cache_module._known_codes.clear()
+    region_cache_module._fully_fetched.clear()
     region_cache_module._cache_loaded = True  # mark loaded so disk isn't re-read
     yield
     ebird_tools_module._client = None
     region_cache_module._known_codes.clear()
     region_cache_module._known_codes.update(original_codes)
+    region_cache_module._fully_fetched.clear()
+    region_cache_module._fully_fetched.update(original_fetched)
     region_cache_module._cache_loaded = original_loaded
 
 
@@ -82,7 +86,8 @@ class TestGetRecentObservationsByLocation:
     def test_returns_json_string(self, mock_client):
         mock_client.recent_observations_by_location.return_value = SAMPLE_OBS
         result = get_recent_observations_by_location.invoke({"lat": 48.85, "lng": 2.35})
-        assert json.loads(result) == SAMPLE_OBS
+        assert "Retrieved" in result
+        assert "observations" in result
 
     def test_passes_all_params_to_client(self, mock_client):
         mock_client.recent_observations_by_location.return_value = SAMPLE_OBS
@@ -119,7 +124,8 @@ class TestGetRecentObservationsByRegion:
     def test_returns_json_string(self, mock_client):
         mock_client.recent_observations_by_region.return_value = SAMPLE_OBS
         result = get_recent_observations_by_region.invoke({"region_code": "US-NY"})
-        assert json.loads(result) == SAMPLE_OBS
+        assert "Retrieved" in result
+        assert "observations" in result
 
     def test_strips_whitespace_from_region_code(self, mock_client):
         mock_client.recent_observations_by_region.return_value = SAMPLE_OBS
@@ -154,7 +160,8 @@ class TestGetHistoricObservations:
         result = get_historic_observations.invoke(
             {"region_code": "CA-ON", "year": 2024, "month": 5, "day": 1}
         )
-        assert json.loads(result) == SAMPLE_OBS
+        assert "Retrieved" in result
+        assert "observations" in result
 
     def test_strips_whitespace_from_region_code(self, mock_client):
         mock_client.historic_observations.return_value = SAMPLE_OBS
@@ -252,7 +259,8 @@ class TestGetNotableObservationsByLocation:
         result = get_notable_observations_by_location.invoke(
             {"lat": 51.5, "lng": -0.12}
         )
-        assert json.loads(result) == SAMPLE_OBS
+        assert "Retrieved" in result
+        assert "observations" in result
 
     def test_passes_optional_params(self, mock_client):
         mock_client.notable_observations_by_location.return_value = SAMPLE_OBS
@@ -301,7 +309,8 @@ class TestAutocorrectSubregion:
 
     def test_uses_subnational2_for_three_part_code(self, mock_client):
         mock_client.region_list.return_value = SAMPLE_SUBREGIONS
-        _autocorrect_subregion("CA-QC-XXX")
+        with pytest.raises(ToolException):
+            _autocorrect_subregion("CA-QC-XXX")
         mock_client.region_list.assert_called_once_with(
             parent_region_code="CA-QC", region_type="subnational2"
         )
@@ -337,20 +346,18 @@ class TestAutocorrectSubregion:
 class TestAutocorrectInRecentObsByRegion:
     def test_autocorrects_bad_subregion_code(self, mock_client):
         """When cache has CA-QC-LAU but not CA-QC-LAL, tool auto-corrects."""
-        region_cache_module._known_codes.add("CA-QC-LAU")
+        from src.utils.region_cache import register_codes
+        register_codes(["CA-QC-LAU"], parent="CA-QC")  # puts CA-QC into _fully_fetched
         mock_client.region_list.return_value = [
             {"code": "CA-QC-LAU", "name": "Laurentides"}
         ]
         mock_client.recent_observations_by_region.return_value = SAMPLE_OBS
 
-        result_json = get_recent_observations_by_region.invoke({"region_code": "CA-QC-LAL"})
-        result = json.loads(result_json)
+        result = get_recent_observations_by_region.invoke({"region_code": "CA-QC-LAL"})
 
-        # Should be wrapped with a correction note
-        assert isinstance(result, dict)
-        assert "CA-QC-LAL" in result["_note"]
-        assert "CA-QC-LAU" in result["_note"]
-        assert result["observations"] == SAMPLE_OBS
+        # Compact summary must mention both the bad and corrected code
+        assert "CA-QC-LAL" in result
+        assert "CA-QC-LAU" in result
 
         # Client called with the corrected code
         mock_client.recent_observations_by_region.assert_called_once_with(
@@ -358,16 +365,16 @@ class TestAutocorrectInRecentObsByRegion:
         )
 
     def test_no_wrapping_when_code_is_valid(self, mock_client):
-        """Valid code → plain JSON array, no envelope."""
+        """Valid code → compact summary, no error mention."""
         mock_client.recent_observations_by_region.return_value = SAMPLE_OBS
-        result = json.loads(
-            get_recent_observations_by_region.invoke({"region_code": "US-NY"})
-        )
-        assert isinstance(result, list)
+        result = get_recent_observations_by_region.invoke({"region_code": "US-NY"})
+        assert isinstance(result, str)
+        assert "was not recognised" not in result
 
     def test_raises_when_autocorrect_also_fails(self, mock_client):
         """If the region list lookup fails too, raise ToolException."""
-        region_cache_module._known_codes.add("CA-QC-LAU")
+        from src.utils.region_cache import register_codes
+        register_codes(["CA-QC-LAU"], parent="CA-QC")  # puts CA-QC into _fully_fetched
         mock_client.region_list.side_effect = EBirdError("lookup failed")
 
         with pytest.raises(ToolException):
@@ -381,21 +388,20 @@ class TestAutocorrectInRecentObsByRegion:
 
 class TestAutocorrectInHistoricObs:
     def test_autocorrects_bad_subregion_code(self, mock_client):
-        region_cache_module._known_codes.add("CA-QC-LAU")
+        from src.utils.region_cache import register_codes
+        register_codes(["CA-QC-LAU"], parent="CA-QC")  # puts CA-QC into _fully_fetched
         mock_client.region_list.return_value = [
             {"code": "CA-QC-LAU", "name": "Laurentides"}
         ]
         mock_client.historic_observations.return_value = SAMPLE_OBS
 
-        result_json = get_historic_observations.invoke(
+        result = get_historic_observations.invoke(
             {"region_code": "CA-QC-LAL", "year": 2024, "month": 5, "day": 1}
         )
-        result = json.loads(result_json)
 
-        assert isinstance(result, dict)
-        assert "CA-QC-LAL" in result["_note"]
-        assert "CA-QC-LAU" in result["_note"]
-        assert result["observations"] == SAMPLE_OBS
+        # Compact summary must mention both the bad and corrected code
+        assert "CA-QC-LAL" in result
+        assert "CA-QC-LAU" in result
 
         mock_client.historic_observations.assert_called_once_with(
             region_code="CA-QC-LAU", year=2024, month=5, day=1
