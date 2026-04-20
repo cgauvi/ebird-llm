@@ -341,10 +341,12 @@ data "aws_iam_policy_document" "github_deploy" {
       "dynamodb:DeleteTable",
       "dynamodb:DescribeContinuousBackups",
       "dynamodb:DescribeTable",
+      "dynamodb:DescribeTimeToLive",
       "dynamodb:ListTagsOfResource",
       "dynamodb:TagResource",
       "dynamodb:UntagResource",
       "dynamodb:UpdateTable",
+      "dynamodb:UpdateTimeToLive",
     ]
     resources = [
       "arn:aws:dynamodb:*:${data.aws_caller_identity.current.account_id}:table/${var.project_name}-*",
