@@ -62,9 +62,10 @@ data "aws_iam_policy_document" "github_oidc_assume" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      # Allow both master and develop branches
+      # Allow master, main, and develop branches
       values = [
         "repo:${var.github_repo}:ref:refs/heads/master",
+        "repo:${var.github_repo}:ref:refs/heads/main",
         "repo:${var.github_repo}:ref:refs/heads/develop",
       ]
     }
