@@ -70,3 +70,27 @@ output "github_deploy_role_arn" {
   description = "ARN of the IAM role assumed by GitHub Actions via OIDC — copy into GitHub secret AWS_DEPLOY_ROLE_ARN"
   value       = aws_iam_role.github_deploy.arn
 }
+
+# ---------------------------------------------------------------------------
+# Auth & Usage
+# ---------------------------------------------------------------------------
+
+output "cognito_user_pool_id" {
+  description = "Cognito User Pool ID (set as COGNITO_USER_POOL_ID env-var for local dev)"
+  value       = aws_cognito_user_pool.main.id
+}
+
+output "cognito_client_id" {
+  description = "Cognito App Client ID (set as COGNITO_CLIENT_ID env-var for local dev)"
+  value       = aws_cognito_user_pool_client.streamlit.id
+}
+
+output "dynamodb_usage_table" {
+  description = "DynamoDB table for monthly usage counters"
+  value       = aws_dynamodb_table.usage.name
+}
+
+output "dynamodb_llm_calls_table" {
+  description = "DynamoDB table for LLM call audit log"
+  value       = aws_dynamodb_table.llm_calls.name
+}

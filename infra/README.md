@@ -27,7 +27,14 @@ Internet
 │  └── streamlit container  │
 │       ├── EBIRD_API_KEY   │◄── SSM SecureString
 │       └── HF_API_TOKEN    │◄── SSM SecureString
-│
+│                            │
+│  Authentication:           │
+│  └── Cognito User Pool   │  (sign-up / sign-in / email verification)
+│                            │
+│  Usage tracking:           │
+│  ├── DynamoDB (usage)    │  (session + prompt counters per user/month)
+│  └── DynamoDB (llm-calls)│  (per-call audit log with GSI on month)
+│                            │
 │  Model selection: Streamlit sidebar (runtime, per-session)
 └───────────────────────────┘
              │ HTTPS egress
@@ -42,10 +49,11 @@ Internet
 |---|---|
 | `networking.tf` | VPC, 2 public subnets, IGW, ALB security group, ECS security group |
 | `ecr_iam.tf` | ECR repository, ECS task execution role, ECS task role, SSM read policy |
-| `ecs.tf` | SSM parameters, CloudWatch log group, ECS cluster, task definition, service |
+| `ecs.tf` | SSM parameters (API keys + Cognito + DynamoDB prefix), CloudWatch log group, ECS cluster, task definition, service |
 | `alb.tf` | ALB, target group, HTTP listener |
+| `auth_usage.tf` | Cognito User Pool + app client, DynamoDB `usage` + `llm-calls` tables, IAM policy for task role |
 | `oidc.tf` | GitHub Actions OIDC provider, deploy IAM role + policy |
-| `outputs.tf` | `app_url`, `set_secrets_commands`, `docker_push_commands`, `github_deploy_role_arn` |
+| `outputs.tf` | `app_url`, `cognito_user_pool_id`, `cognito_client_id`, `dynamodb_usage_table`, `dynamodb_llm_calls_table`, `set_secrets_commands`, `docker_push_commands`, `github_deploy_role_arn` |
 
 All resources are namespaced by `ebird-llm-<environment>` (e.g. `ebird-llm-dev`,
 `ebird-llm-prod`). The two environments use non-overlapping VPC CIDRs

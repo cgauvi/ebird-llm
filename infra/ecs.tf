@@ -31,6 +31,25 @@ resource "aws_ssm_parameter" "hf_api_token" {
   }
 }
 
+# Cognito parameters (auto-populated by Terraform)
+resource "aws_ssm_parameter" "cognito_user_pool_id" {
+  name  = "/${local.prefix}/COGNITO_USER_POOL_ID"
+  type  = "String"
+  value = aws_cognito_user_pool.main.id
+}
+
+resource "aws_ssm_parameter" "cognito_client_id" {
+  name  = "/${local.prefix}/COGNITO_CLIENT_ID"
+  type  = "String"
+  value = aws_cognito_user_pool_client.streamlit.id
+}
+
+resource "aws_ssm_parameter" "dynamodb_table_prefix" {
+  name  = "/${local.prefix}/DYNAMODB_TABLE_PREFIX"
+  type  = "String"
+  value = local.prefix
+}
+
 # ---------------------------------------------------------------------------
 # CloudWatch Log Group
 # ---------------------------------------------------------------------------
@@ -77,6 +96,14 @@ resource "aws_ecs_task_definition" "app" {
       secrets = [
         { name = "EBIRD_API_KEY",          valueFrom = aws_ssm_parameter.ebird_api_key.arn },
         { name = "HUGGINGFACE_API_TOKEN",   valueFrom = aws_ssm_parameter.hf_api_token.arn }
+      ]
+
+      # Non-secret configuration from SSM
+      environment = [
+        { name = "COGNITO_USER_POOL_ID",  value = aws_cognito_user_pool.main.id },
+        { name = "COGNITO_CLIENT_ID",      value = aws_cognito_user_pool_client.streamlit.id },
+        { name = "DYNAMODB_TABLE_PREFIX",  value = local.prefix },
+        { name = "AWS_REGION",             value = var.aws_region },
       ]
 
       logConfiguration = {

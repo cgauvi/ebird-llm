@@ -22,40 +22,54 @@ from src.utils.state import VizBuffer, get_last_observations, get_last_obs_file,
 
 
 # ---------------------------------------------------------------------------
-# Helper — load observations from a file path or session cache
+# Helpers — parse observations JSON or fall back to session cache
 # ---------------------------------------------------------------------------
 
 
-def _load_obs(observations_file: str) -> list[dict]:
-    """Return observation records from *observations_file* or the session cache.
+def parse_observations_json(observations_json: str) -> list[dict]:
+    """Parse and validate an observations JSON string.
 
-    Priority:
-    1. If *observations_file* is provided, read and parse that JSON file.
-    2. Fall back to the in-process DataFrame cache (fastest, zero-copy).
-    3. Fall back to the raw JSON string cache kept by ``set_last_observations``.
+    Handles common LLM output artefacts:
+    - Surrounding whitespace
+    - Backslash-escaped quotes (\\\" instead of ")
+    - JSON string wrapped in an extra outer pair of quotes
     """
-    if observations_file and observations_file.strip():
-        path = Path(observations_file.strip())
-        if path.exists():
+    text = observations_json.strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        # LLM artefact: every " escaped as \"
+        try:
+            parsed = json.loads(text.replace('\\"', '"'))
+        except json.JSONDecodeError as exc:
+            raise ToolException(
+                f"Observations JSON is not valid JSON: {exc}"
+            ) from exc
+
+    # LLM artefact: whole JSON wrapped in an extra pair of outer quotes
+    if isinstance(parsed, str):
+        inner = parsed
+        try:
+            parsed = json.loads(inner)
+        except json.JSONDecodeError:
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                parsed = json.loads(inner.replace('\\"', '"'))
             except json.JSONDecodeError as exc:
                 raise ToolException(
-                    f"Failed to parse observations file {path}: {exc}"
+                    f"Observations JSON is not valid JSON: {exc}"
                 ) from exc
-            if isinstance(data, dict) and "observations" in data:
-                data = data["observations"]
-            if not isinstance(data, list):
-                raise ToolException("Expected a JSON array of observations in the file.")
-            return data
-        # File not found — fall through to session cache below
 
-    # Fall back to session DataFrame cache
+    if not isinstance(parsed, list):
+        raise ToolException("Expected a JSON array of observations.")
+    return parsed
+
+
+def _load_from_cache() -> list[dict]:
+    """Return observations from the in-process session cache."""
     df = get_obs_dataframe()
     if df is not None and not df.empty:
         return df.to_dict(orient="records")
 
-    # Fall back to last known observations file written this session
     last_file = get_last_obs_file()
     if last_file:
         path = Path(last_file)
@@ -69,7 +83,6 @@ def _load_obs(observations_file: str) -> list[dict]:
             except json.JSONDecodeError:
                 pass
 
-    # Fall back to raw JSON string cache
     cached = get_last_observations()
     if cached:
         try:
@@ -83,7 +96,7 @@ def _load_obs(observations_file: str) -> list[dict]:
 
     raise ToolException(
         "No observation data available. Run an eBird data tool first, "
-        "then pass the returned file path as observations_file."
+        "then pass the returned JSON as observations_json."
     )
 
 
@@ -93,7 +106,7 @@ def _load_obs(observations_file: str) -> list[dict]:
 
 
 @tool
-def create_sightings_map(observations_file: str = "") -> str:
+def create_sightings_map(observations_json: str = "") -> str:
     """Build an interactive map that plots bird sighting locations.
 
     Each sighting is shown as a circle marker.  Clicking a marker reveals the
@@ -103,15 +116,14 @@ def create_sightings_map(observations_file: str = "") -> str:
     to *show*, *map*, or *visualise* sightings geographically.
 
     Args:
-        observations_file: Path to the JSON file returned by an eBird data tool
-            (included in the tool's output as "JSON file: /path/to/file.json").
-            Leave empty to use the session cache automatically.
+        observations_json: JSON array of observation records returned by an
+            eBird data tool.  Leave empty to use the session cache automatically.
 
     Returns:
         A short confirmation string, e.g. "Map created with 42 sightings."
         The map itself is rendered in the Streamlit right panel automatically.
     """
-    records = _load_obs(observations_file)
+    records = parse_observations_json(observations_json) if observations_json.strip() else _load_from_cache()
 
     # Filter records that have coordinates
     geo_records = [
@@ -191,6 +203,7 @@ def create_sightings_map(observations_file: str = "") -> str:
         df_geo[list(available.keys())]
         .rename(columns=available)
         .sort_values("Count", ascending=False)
+        .head(10)
         .reset_index(drop=True)
     )
 
@@ -211,7 +224,7 @@ def create_sightings_map(observations_file: str = "") -> str:
 
 @tool
 def create_historical_chart(
-    observations_file: str = "",
+    observations_json: str = "",
     chart_type: Literal["bar", "line", "scatter", "heatmap", "facet_bar", "box"] = "bar",
     top_n_species: int = 15,
 ) -> str:
@@ -221,9 +234,8 @@ def create_historical_chart(
     observations over time or by species count.
 
     Args:
-        observations_file: Path to the JSON file returned by an eBird data tool
-            (included in the tool's output as "JSON file: /path/to/file.json").
-            Leave empty to use the session cache automatically.
+        observations_json: JSON array of observation records returned by an
+            eBird data tool.  Leave empty to use the session cache automatically.
         chart_type: Chart style to render.
             - 'bar'       (default) — horizontal bar chart ranked by total count.
             - 'line'      — time-series line chart per species (requires 'obsDt').
@@ -240,7 +252,7 @@ def create_historical_chart(
         A short confirmation string, e.g. "Chart created with 120 records."
         The chart is rendered in the Streamlit right panel automatically.
     """
-    records = _load_obs(observations_file)
+    records = parse_observations_json(observations_json) if observations_json.strip() else _load_from_cache()
     if not records:
         raise ToolException("The observations list is empty — nothing to chart.")
 

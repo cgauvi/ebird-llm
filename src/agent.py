@@ -24,7 +24,9 @@ reset_agent()
 
 import json
 import logging
+import os
 import re
+import time
 
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import AIMessage, HumanMessage
@@ -144,6 +146,15 @@ You have access to the following tools:
 • create_sightings_map                — draw an interactive map of sightings
 • create_historical_chart             — draw a bar or line chart of observations
 • summarize_output                    — save a large text output to a file and return a compact summary
+
+summarize_output rules (CRITICAL):
+- ONLY call summarize_output when a previous tool returned a very large text
+  output that you received verbatim and need to compress.
+- NEVER construct text yourself (markdown tables, formatted lists, etc.) and
+  pass it to summarize_output. The JSON serialization of large hand-crafted
+  text will fail and crash the request.
+- If you want to present data to the user, just write your summary directly
+  in your response — do not route it through summarize_output.
 
 Observation data workflow (IMPORTANT — reduces token usage):
 1. When an eBird data tool returns results, the output includes:
@@ -302,15 +313,28 @@ def run_agent(user_input: str, history: list[dict] | None = None) -> str:
     add_log_entry("INFO", "src.agent", f"User: {user_input}")
 
     agent = _get_agent()
-    result = agent.invoke(
-        {"messages": _build_messages(user_input, history)},
-    )
+    try:
+        result = agent.invoke(
+            {"messages": _build_messages(user_input, history)},
+        )
+    except Exception as exc:
+        exc_str = str(exc)
+        logger.warning("run_agent: agent.invoke() raised: %s", exc_str)
+        add_log_entry("WARNING", "src.agent", f"Agent invoke error: {exc_str}")
+        if "Failed to parse tool call arguments as JSON" in exc_str:
+            return (
+                "Sorry, the model produced a malformed tool call that "
+                "couldn't be processed. Please try rephrasing your "
+                "request or asking a simpler follow-up question."
+            )
+        return exc_str
     messages = result["messages"]
 
     tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
 
     # Walk backwards to find the last AIMessage with real text content,
     # skipping any that are just echoed tool-call markup (start with "[").
+    response_text = ""
     for msg in reversed(messages):
         if not isinstance(msg, AIMessage):
             continue
@@ -318,15 +342,54 @@ def run_agent(user_input: str, history: list[dict] | None = None) -> str:
         if content.strip() and not content.strip().startswith("["):
             add_log_entry("LLM_OUT", "src.agent", content)
             logger.info("Agent response: %s", content[:500])
-            return content
+            response_text = content
+            break
 
     # Fall back to tool output if the LLM produced no summary
-    if tool_messages:
-        return " ".join(
+    if not response_text and tool_messages:
+        response_text = " ".join(
             m.content for m in tool_messages if isinstance(m.content, str)
         )
 
-    return str(messages[-1].content)
+    if not response_text:
+        response_text = str(messages[-1].content)
+
+    # Post-invoke fallback: if the user asked for a map/chart but the LLM
+    # didn't call the viz tool, auto-invoke it with cached observation data.
+    # Mirrors the post-stream fallback in stream_agent().
+    if VizBuffer["type"] is None and response_text:
+        _obs_file = get_last_obs_file()
+        _obs_data = get_last_observations()
+        if _obs_file or _obs_data:
+            _tool_map = {t.name: t for t in EBIRD_TOOLS + VIZ_TOOLS + SUMMARIZER_TOOLS}
+            _map_signal = re.search(
+                r"(?:creat|generat|produc|render|built?|plott|display)(?:ed|ing).{0,50}(?:\bmap\b)"
+                r"|\bmap\b.{0,50}(?:creat|generat|produc|render|built?|plott|display)(?:ed|ing)"
+                r"|here(?:'s| is).{0,20}\bmap\b",
+                response_text, re.IGNORECASE,
+            )
+            _chart_signal = re.search(
+                r"(?:creat|generat|produc|render|built?|plott|display)(?:ed|ing).{0,50}(?:chart|graph|plot|histogram)"
+                r"|(?:chart|graph|plot|histogram).{0,50}(?:creat|generat|produc|render|built?|plott|display)(?:ed|ing)"
+                r"|here(?:'s| is).{0,20}(?:chart|graph|plot)",
+                response_text, re.IGNORECASE,
+            )
+            _map_requested = re.search(r"\bmap\b", user_input, re.IGNORECASE)
+            _chart_requested = re.search(r"\bchart\b|\bplot\b|\bgraph\b", user_input, re.IGNORECASE)
+            _fallback_tool: str | None = None
+            if _map_signal or (_map_requested and not _chart_signal):
+                _fallback_tool = "create_sightings_map"
+            elif _chart_signal or _chart_requested:
+                _fallback_tool = "create_historical_chart"
+            if _fallback_tool and _fallback_tool in _tool_map:
+                logger.info("run_agent post-invoke fallback: invoking '%s'", _fallback_tool)
+                add_log_entry("INFO", "src.agent", f"Post-invoke fallback: {_fallback_tool}")
+                try:
+                    _tool_map[_fallback_tool].invoke({})
+                except Exception as _exc:
+                    logger.warning("Post-invoke fallback '%s' failed: %s", _fallback_tool, _exc)
+
+    return response_text
 
 
 # Human-readable labels for each tool, shown in the progress panel.
@@ -369,6 +432,8 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
     agent = _get_agent()
     _tool_map = {t.name: t for t in EBIRD_TOOLS + VIZ_TOOLS + SUMMARIZER_TOOLS}
     _last_final_content: str = ""
+    _tool_names_used: list[str] = []
+    _t_start = time.monotonic()
     logger.info("stream_agent called | input: %s", user_input[:200])
     add_log_entry("INFO", "src.agent", f"User: {user_input}")
 
@@ -385,9 +450,23 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
     try:
         chunks = _stream_invoke()
     except Exception as exc:
-        logger.warning("stream_agent: agent.stream() raised: %s", exc)
-        add_log_entry("WARNING", "src.agent", f"Agent stream error: {exc}")
-        yield {"type": "final", "content": str(exc)}
+        exc_str = str(exc)
+        logger.warning("stream_agent: agent.stream() raised: %s", exc_str)
+        add_log_entry("WARNING", "src.agent", f"Agent stream error: {exc_str}")
+        # Malformed tool-call JSON from the LLM (e.g. unescaped markdown
+        # tables in arguments) — give the user a friendly message instead
+        # of the raw API error.
+        if "Failed to parse tool call arguments as JSON" in exc_str:
+            yield {
+                "type": "final",
+                "content": (
+                    "Sorry, the model produced a malformed tool call that "
+                    "couldn't be processed. Please try rephrasing your "
+                    "request or asking a simpler follow-up question."
+                ),
+            }
+        else:
+            yield {"type": "final", "content": exc_str}
         return
 
     for chunk in chunks:
@@ -399,6 +478,7 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
                         args_str = json.dumps(tc.get("args", {}), default=str)
                         add_log_entry("TOOL_IN", "src.agent", f"→ {name}({args_str})")
                         logger.debug("Tool call: %s | args: %s", name, args_str)
+                        _tool_names_used.append(name)
                         yield {
                             "type": "tool_start",
                             "name": name,
@@ -596,6 +676,27 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
                     logger.warning(
                         "Post-stream fallback '%s' failed: %s", _poststream_tool, _exc
                     )
+
+    # --- Log the LLM call to DynamoDB for analytics ---
+    _latency_ms = int((time.monotonic() - _t_start) * 1000)
+    try:
+        from src.utils.usage_tracker import log_llm_call as _log_call
+        import streamlit as _st
+        _user = getattr(_st.session_state, "user_email", None)
+        _sid = getattr(_st.session_state, "session_id", None)
+        if _user:
+            _model = os.environ.get("HF_MODEL_ID", "unknown")
+            _log_call(
+                _user,
+                session_id=_sid or "unknown",
+                model=_model,
+                prompt_chars=len(user_input),
+                response_chars=len(_last_final_content),
+                latency_ms=_latency_ms,
+                tool_calls=_tool_names_used or None,
+            )
+    except Exception:
+        logger.debug("LLM call logging skipped (tracker not configured)")
 
 
 def reset_agent() -> None:
