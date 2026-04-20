@@ -13,27 +13,42 @@ and renders interactive maps and charts inside a **Streamlit** split-panel UI.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Streamlit app.py  (split layout: chat left, visualization right)   │
-│                                                                     │
-│  LangChain AgentExecutor                                            │
-│  ├── LLM: ChatHuggingFace  (selectable model — see .env.example)   │
-│  ├── Memory: ConversationBufferWindowMemory (k=10)                  │
-│  └── Tools                                                          │
-│       ├── eBird tools (src/tools/ebird_tools.py)                    │
-│       │    ├── get_recent_observations_by_location                  │
-│       │    ├── get_recent_observations_by_region                    │
-│       │    ├── get_historic_observations                            │
-│       │    ├── get_nearby_hotspots                                  │
-│       │    ├── get_region_list                                      │
-│       │    └── get_notable_observations_by_location                 │
-│       └── Visualization tools (src/tools/viz_tools.py)              │
-│            ├── create_sightings_map  →  folium map                  │
-│            └── create_historical_chart  →  plotly bar/line          │
-│                                                                     │
-│  src/utils/ebird_client.py  ──►  https://api.ebird.org/v2           │
-│  src/utils/state.py          ──►  VizBuffer (side-channel to UI)    │
-└─────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│  Streamlit app.py  (split layout: chat left, visualization right)     │
+│                                                                       │
+│  Authentication gate (AWS Cognito User Pool)                          │
+│  ├── Sign-up / Sign-in / Email verification                          │
+│  └── Usage tracking + rate limiting (DynamoDB)                        │
+│       ├── 10 sessions / month (configurable)                          │
+│       └── 30 prompts  / month (configurable)                          │
+│                                                                       │
+│  LangChain ReAct Agent (langgraph)                                    │
+│  ├── LLM: ChatHuggingFace  (selectable model — see .env.example)     │
+│  ├── Memory: stateless — rolling-summary compression of history       │
+│  └── Tools                                                            │
+│       ├── eBird tools (src/tools/ebird_tools.py)                      │
+│       │    ├── get_recent_observations_by_location                    │
+│       │    ├── get_recent_observations_by_region                      │
+│       │    ├── get_historic_observations                              │
+│       │    ├── get_nearby_hotspots                                    │
+│       │    ├── get_region_list                                        │
+│       │    ├── get_notable_observations_by_location                   │
+│       │    ├── get_region_info                                        │
+│       │    ├── get_top100_contributors                                │
+│       │    ├── get_species_list                                       │
+│       │    ├── get_region_stats                                       │
+│       │    └── validate_species                                       │
+│       ├── Visualization tools (src/tools/viz_tools.py)                │
+│       │    ├── create_sightings_map  →  folium map                    │
+│       │    └── create_historical_chart  →  plotly bar/line            │
+│       └── Summarizer tool (src/tools/summarizer_tool.py)              │
+│            └── summarize_output  →  condenses large text outputs      │
+│                                                                       │
+│  src/utils/ebird_client.py   ──►  https://api.ebird.org/v2            │
+│  src/utils/auth.py           ──►  AWS Cognito (sign-up / sign-in)     │
+│  src/utils/usage_tracker.py  ──►  DynamoDB (rate limits + LLM audit)  │
+│  src/utils/state.py          ──►  VizBuffer (side-channel to UI)      │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -42,23 +57,31 @@ and renders interactive maps and charts inside a **Streamlit** split-panel UI.
 
 ```
 ebird-llm/
-├── app.py                      # Streamlit entry point (UI only)
-├── src/                        # All application logic
+├── app.py                      # Streamlit entry point (auth gate + UI)
+├── src/
 │   ├── __init__.py
-│   ├── agent.py                # LangChain agent + executor setup
+│   ├── agent.py                # LangChain ReAct agent (langgraph)
 │   ├── config.py               # HuggingFace model catalog + build_llm()
 │   ├── tools/
 │   │   ├── __init__.py
-│   │   ├── ebird_tools.py      # 6 eBird API @tool functions
-│   │   └── viz_tools.py        # map + chart @tool functions
+│   │   ├── ebird_tools.py      # 11 eBird API @tool functions
+│   │   ├── viz_tools.py        # map + chart @tool functions
+│   │   └── summarizer_tool.py  # condense large tool outputs
 │   └── utils/
 │       ├── __init__.py
+│       ├── auth.py             # AWS Cognito sign-up / sign-in
 │       ├── ebird_client.py     # Thin HTTP client for eBird API v2
-│       └── state.py            # VizBuffer shared state
+│       ├── logging_config.py   # Structured logging + log buffer
+│       ├── region_cache.py     # Region code auto-correction cache
+│       ├── state.py            # VizBuffer shared state
+│       ├── summarizer.py       # Text summarization utilities
+│       └── usage_tracker.py    # DynamoDB usage tracking + rate limits
+├── tests/                      # pytest test suite
 ├── environment.yml             # Conda environment specification (local dev)
 ├── Dockerfile                  # Multi-stage production image
 ├── requirements-docker.txt     # Pip deps for Docker build
-├── infra/                      # Terraform — AWS ECS/Fargate deployment
+├── requirements-test.txt       # Extra test deps (pytest, mocking)
+├── infra/                      # Terraform — AWS ECS/Fargate + Cognito + DynamoDB
 │   └── README.md               # Deployment guide
 ├── .env                        # API keys — local only, never committed
 ├── .env.example                # API key template (safe to commit)
@@ -141,6 +164,8 @@ Changing the selection resets the conversation and rebuilds the LLM automaticall
 |---|---|---|
 | `qwen2.5-72b` | Qwen/Qwen2.5-72B-Instruct | **default** |
 | `gemma-3-27b` | google/gemma-3-27b-it | requires Google licence |
+| `gpt-oss-120b` | openai/gpt-oss-120b | high reasoning, harmony response format |
+| `gpt-oss-20b` | openai/gpt-oss-20b | lower latency, harmony response format |
 
 All models are served through the HuggingFace Inference API and must support tool/function calling.
 
@@ -176,13 +201,24 @@ Click **New Conversation** in the sidebar to reset chat history and memory.
 | `get_nearby_hotspots` | `GET /ref/hotspot/geo` | `lat`, `lng`, `dist_km` |
 | `get_region_list` | `GET /ref/region/list/{type}/{parent}` | `region_type`, `parent_region_code` |
 | `get_notable_observations_by_location` | `GET /data/obs/geo/recent/notable` | `lat`, `lng`, `dist_km`, `days_back` |
+| `get_region_info` | `GET /ref/region/info/{regionCode}` | `region_code` |
+| `get_top100_contributors` | `GET /product/top100/{regionCode}/{y}/{m}/{d}` | `region_code`, `year`, `month`, `day` |
+| `get_species_list` | `GET /product/spplist/{regionCode}` | `region_code` |
+| `get_region_stats` | `GET /product/stats/{regionCode}/{y}/{m}/{d}` | `region_code`, `year`, `month`, `day` |
+| `validate_species` | *(local cache / species list lookup)* | `species_name`, `region_code` |
 
 ### Visualization Tools (`src/tools/viz_tools.py`)
 
 | Tool | Output | Parameters |
 |---|---|---|
-| `create_sightings_map` | Interactive folium map (circle markers, tooltips) | `observations_json` |
-| `create_historical_chart` | Plotly bar or line chart | `observations_json`, `chart_type`, `top_n_species` |
+| `create_sightings_map` | Interactive folium map (circle markers, tooltips) | `observations_json` or `observations_file` |
+| `create_historical_chart` | Plotly bar or line chart | `observations_json` or `observations_file`, `chart_type`, `top_n_species` |
+
+### Summarizer Tool (`src/tools/summarizer_tool.py`)
+
+| Tool | Output | Parameters |
+|---|---|---|
+| `summarize_output` | Condensed text summary | `raw_output` |
 
 ---
 
@@ -193,6 +229,16 @@ Click **New Conversation** in the sidebar to reset chat history and memory.
 | `EBIRD_API_KEY` | Yes | eBird API key — https://ebird.org/api/keygen |
 | `HUGGINGFACE_API_TOKEN` | Yes | HuggingFace token for Inference API access |
 | `HF_MODEL_ID` | No | Short alias or full repo ID (default: `qwen2.5-72b`) |
+| `COGNITO_USER_POOL_ID` | No* | AWS Cognito User Pool ID (enables auth gate) |
+| `COGNITO_CLIENT_ID` | No* | Cognito App Client ID |
+| `DYNAMODB_TABLE_PREFIX` | No* | DynamoDB table name prefix (default: `ebird-llm-dev`) |
+| `AWS_REGION` | No | AWS region for Cognito + DynamoDB (default: `us-east-2`) |
+| `MAX_SESSIONS_PER_MONTH` | No | Session limit per user per month (default: `10`) |
+| `MAX_PROMPTS_PER_MONTH` | No | Prompt limit per user per month (default: `30`) |
+
+\* Authentication is optional. When `COGNITO_USER_POOL_ID` and `COGNITO_CLIENT_ID`
+are unset the app runs without login (useful for local development). Set them to
+enable the full auth + rate-limiting flow.
 
 ---
 
