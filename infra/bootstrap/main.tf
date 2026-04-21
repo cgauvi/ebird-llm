@@ -380,10 +380,11 @@ data "aws_iam_policy_document" "github_deploy" {
   statement {
     sid     = "IAMOIDC"
     effect  = "Allow"
-    actions = ["iam:GetOpenIDConnectProvider"]
-    resources = [
-      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com",
+    actions = [
+      "iam:GetOpenIDConnectProvider",
+      "iam:ListOpenIDConnectProviders",
     ]
+    resources = ["*"]
   }
 
   statement {
