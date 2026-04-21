@@ -178,3 +178,57 @@ def log_llm_call(
 def is_configured() -> bool:
     """Return True if we can reach DynamoDB (tables may not exist yet)."""
     return bool(_TABLE_PREFIX)
+
+
+def _session_logs_table():
+    return _get_dynamodb().Table(f"{_TABLE_PREFIX}-session-logs")
+
+
+# ---------------------------------------------------------------------------
+# Session log archival
+# ---------------------------------------------------------------------------
+
+# 90 days in seconds
+_SESSION_LOG_TTL_SECS = 90 * 86_400
+
+
+def flush_session_logs(
+    user_id: str,
+    session_id: str,
+    entries: list[dict],
+) -> None:
+    """Batch-write *entries* from the in-memory LogBuffer to DynamoDB.
+
+    Each entry becomes one row keyed by ``session_id`` (hash) and a sortable
+    ``log_id`` of the form ``"<epoch_ms_at_flush>#<zero_padded_index>"`` so
+    that successive flushes within the same session remain ordered and unique.
+
+    Call this right before ``st.rerun()`` so the log survives the Streamlit
+    worker restart.  The function is a no-op if *entries* is empty or if the
+    DynamoDB table is unreachable (errors are logged, never raised).
+    """
+    if not entries or not session_id:
+        return
+
+    now = datetime.now(timezone.utc)
+    ttl = int(now.timestamp()) + _SESSION_LOG_TTL_SECS
+    # Millisecond epoch as the time-ordered prefix for log_id
+    base_ms = int(now.timestamp() * 1000)
+
+    try:
+        table = _session_logs_table()
+        with table.batch_writer() as batch:
+            for i, entry in enumerate(entries):
+                batch.put_item(Item={
+                    "session_id": session_id,
+                    # Sortable, unique range key: epoch_ms#sequence
+                    "log_id": f"{base_ms:016d}#{i:06d}",
+                    "user_id": user_id or "anonymous",
+                    "ts": entry.get("ts", ""),
+                    "level": entry.get("level", "INFO"),
+                    "logger": entry.get("logger", ""),
+                    "message": entry.get("message", ""),
+                    "ttl": ttl,
+                })
+    except ClientError:
+        logger.exception("flush_session_logs failed for session %s", session_id)

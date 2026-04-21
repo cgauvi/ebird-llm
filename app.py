@@ -467,5 +467,17 @@ with chat_col:
         st.session_state.log_entries.extend(list(LogBuffer))
         clear_log_buffer()
 
+        # Persist log entries for the completed turn to DynamoDB for later inspection.
+        if st.session_state.log_entries:
+            try:
+                from src.utils.usage_tracker import flush_session_logs
+                flush_session_logs(
+                    user_id=st.session_state.get("user_email") or "anonymous",
+                    session_id=st.session_state.get("session_id") or "",
+                    entries=st.session_state.log_entries,
+                )
+            except Exception:
+                pass  # never block the UI on logging failures
+
         # Rerun to refresh both chat history and viz panel
         st.rerun()
