@@ -307,6 +307,34 @@ The deploy workflow (`.github/workflows/deploy.yml`) only runs after the
 
 ---
 
+## Provider Lock File
+
+The `.terraform.lock.hcl` file pins the exact provider versions and checksums
+used by this module. It is committed to the repository so that every `terraform
+init` uses the same provider build, regardless of when or where it runs.
+
+**Generate / regenerate the lock file** (run once after adding or upgrading a provider):
+
+```bash
+cd infra
+terraform init   # creates or updates .terraform.lock.hcl
+git add .terraform.lock.hcl
+```
+
+To pre-populate checksums for all deployment platforms at once:
+
+```bash
+terraform providers lock \
+  -platform=linux_amd64 \
+  -platform=darwin_amd64 \
+  -platform=darwin_arm64
+```
+
+**Recreate:** any `terraform init` that finds `.terraform.lock.hcl` will
+automatically download the pinned provider versions. No extra flags needed.
+
+---
+
 ## Day-2 Operations
 
 **Pause the app (stop billing for compute):**
@@ -331,8 +359,6 @@ aws logs tail /ecs/ebird-llm-prod --follow --region us-east-2
 # Dev
 terraform init -backend-config=backend-dev.hcl -reconfigure
 terraform destroy -var-file=dev.tfvars
-dynamodb:DescribeContinuousBackups
-dynamodb:DescribeTable
 
 # Prod
 terraform init -backend-config=backend-prod.hcl -reconfigure
@@ -340,8 +366,6 @@ terraform destroy -var-file=prod.tfvars
 ```
 
 ---
-cognito-idp:GetUserPoolMfaConfig
-cognito-idp:UpdateUserPoolClient
 
 ## Adding HTTPS
 
@@ -360,7 +384,7 @@ cognito-idp:UpdateUserPoolClient
 | ALB | ~$18 | ~$18 |
 | ECR storage (~1 GB) | ~$0.10 | ~$0.10 |
 | CloudWatch Logs | < $1 | < $1 |
-| SSM parameters | Free tier |
+| SSM parameters | Free tier | Free tier |
 | **Total** | **~$55/month** |
 
 Set `desired_count = 0` when the app is not in use to eliminate Fargate costs.

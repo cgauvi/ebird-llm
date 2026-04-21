@@ -107,6 +107,35 @@ conda env create -f environment.yml
 conda activate ebird_llm_env
 ```
 
+#### Lock the environment
+
+Generate lock-files that pin every resolved package version so the environment
+can be reproduced exactly:
+
+```bash
+# Conda lock-file (cross-platform, build hashes omitted)
+conda env export --no-builds > environment-lock.yml
+
+# Pip lock-file used by the Docker build
+pip freeze > requirements-docker.lock.txt
+```
+
+Commit both files. `environment.yml` is the editable source of intent (loose
+bounds); the lock-files are what teammates and CI actually install from.
+
+**Recreate from the lock-files:**
+
+```bash
+# Recreate the Conda environment exactly
+conda env create -f environment-lock.yml
+
+# Or recreate just the pip layer (e.g. inside Docker)
+pip install -r requirements-docker.lock.txt
+```
+
+> To update dependencies: edit `environment.yml`, recreate the env, then
+> re-export the lock-files and commit them.
+
 ### 2. Configure API keys
 
 The `.env` file lives at the **project root** (same level as `app.py`).
@@ -156,6 +185,28 @@ docker run --rm --env-file .env --no-healthcheck --privileged ebird-llm-local:te
 ```
 
 The app opens at `http://localhost:8501`.
+
+
+---
+
+## Track / Monitor Usage
+
+Query DynamoDB session logs directly with the AWS CLI:
+
+```bash
+# All logs for a specific session
+aws dynamodb query \
+  --table-name ebird-llm-dev-session-logs \
+  --key-condition-expression "session_id = :sid" \
+  --expression-attribute-values '{":sid": {"S": "<session-uuid>"}}'
+
+# All logs for a user (via GSI)
+aws dynamodb query \
+  --table-name ebird-llm-dev-session-logs \
+  --index-name user-log-index \
+  --key-condition-expression "user_id = :uid" \
+  --expression-attribute-values '{":uid": {"S": "user@example.com"}}'
+```
 
 ---
 
