@@ -113,6 +113,52 @@ resource "aws_dynamodb_table" "llm_calls" {
 }
 
 # ---------------------------------------------------------------------------
+# DynamoDB — per-session log archive
+#
+# Every log entry written to the in-memory LogBuffer during a user turn is
+# flushed here before the Streamlit rerun.  Entries are queryable by
+# session_id (hash) + log_id (range) and, via a GSI, by user_id + log_id
+# so you can retrieve the full history for a given user across sessions.
+#
+# TTL: 90 days (configurable by changing the ttl attribute on each item).
+# ---------------------------------------------------------------------------
+
+resource "aws_dynamodb_table" "session_logs" {
+  name         = "${local.prefix}-session-logs"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "session_id"
+  range_key    = "log_id"
+
+  attribute {
+    name = "session_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "log_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+
+  # GSI: look up all log entries across sessions for a single user
+  global_secondary_index {
+    name            = "user-log-index"
+    hash_key        = "user_id"
+    range_key       = "log_id"
+    projection_type = "ALL"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+}
+
+# ---------------------------------------------------------------------------
 # IAM — grant the ECS task role access to Cognito + DynamoDB
 # ---------------------------------------------------------------------------
 
@@ -130,7 +176,7 @@ data "aws_iam_policy_document" "app_permissions" {
     resources = [aws_cognito_user_pool.main.arn]
   }
 
-  # DynamoDB — read/write usage and llm-calls tables
+  # DynamoDB — read/write usage, llm-calls, and session-logs tables
   statement {
     sid    = "DynamoDB"
     effect = "Allow"
@@ -139,11 +185,14 @@ data "aws_iam_policy_document" "app_permissions" {
       "dynamodb:PutItem",
       "dynamodb:UpdateItem",
       "dynamodb:Query",
+      "dynamodb:BatchWriteItem",
     ]
     resources = [
       aws_dynamodb_table.usage.arn,
       aws_dynamodb_table.llm_calls.arn,
       "${aws_dynamodb_table.llm_calls.arn}/index/*",
+      aws_dynamodb_table.session_logs.arn,
+      "${aws_dynamodb_table.session_logs.arn}/index/*",
     ]
   }
 }

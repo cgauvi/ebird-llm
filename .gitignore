@@ -3,7 +3,7 @@
 
 # Terraform
 **/.terraform/
-**/.terraform.lock.hcl
+# .terraform.lock.hcl should be committed — do NOT ignore it
 *.tfstate
 *.tfstate.backup
 *.tfstate.*.backup
