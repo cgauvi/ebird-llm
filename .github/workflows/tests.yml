@@ -3,8 +3,18 @@ name: Unit Tests
 on:
   push:
     branches: ["main", "master", "develop"]
+    paths:
+      - "src/**"
+      - "app.py"
+      - "Dockerfile"
+      - "requirements*.txt"
   pull_request:
     branches: ["main", "master"]
+    paths:
+      - "src/**"
+      - "app.py"
+      - "Dockerfile"
+      - "requirements*.txt"
 
 jobs:
   test:

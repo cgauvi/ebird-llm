@@ -1,0 +1,251 @@
+name: Infrastructure
+
+on:
+  push:
+    branches: ["master", "main", "develop"]
+    paths: ["infra/**"]
+  pull_request:
+    branches: ["master", "main", "develop"]
+    paths: ["infra/**"]
+
+# One Terraform operation per environment at a time.
+# cancel-in-progress: false ensures a running apply is never interrupted.
+# github.head_ref is set on pull_request events (source branch);
+# github.ref_name is used for push events (target branch).
+concurrency:
+  group: terraform-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Plan — always runs; posts the plan as a workflow summary and PR comment
+  # ---------------------------------------------------------------------------
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write       # OIDC token
+      contents: read
+      pull-requests: write  # post plan as a PR comment
+
+    outputs:
+      tf_env:    ${{ steps.env.outputs.tf_env }}
+      exit_code: ${{ steps.plan.outputs.exit_code }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Determine environment from branch ───────────────────────────────
+      - name: Set deployment environment
+        id: env
+        run: |
+          # On a PR event head_ref is the source branch; on a push it is ref_name.
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          if [[ "$BRANCH" == "master" || "$BRANCH" == "main" ]]; then
+            echo "TF_ENV=prod"                   >> "$GITHUB_ENV"
+            echo "BACKEND_FILE=backend-prod.hcl" >> "$GITHUB_ENV"
+            echo "TFVARS_FILE=prod.tfvars"        >> "$GITHUB_ENV"
+            echo "VPC_CIDR=10.1.0.0/16"          >> "$GITHUB_ENV"
+            echo "TASK_CPU=1024"                 >> "$GITHUB_ENV"
+            echo "TASK_MEMORY=2048"              >> "$GITHUB_ENV"
+            echo "DESIRED_COUNT=1"               >> "$GITHUB_ENV"
+            echo "tf_env=prod"                   >> "$GITHUB_OUTPUT"
+          else
+            echo "TF_ENV=dev"                    >> "$GITHUB_ENV"
+            echo "BACKEND_FILE=backend-dev.hcl"  >> "$GITHUB_ENV"
+            echo "TFVARS_FILE=dev.tfvars"         >> "$GITHUB_ENV"
+            echo "VPC_CIDR=10.0.0.0/16"          >> "$GITHUB_ENV"
+            echo "TASK_CPU=512"                  >> "$GITHUB_ENV"
+            echo "TASK_MEMORY=1024"              >> "$GITHUB_ENV"
+            echo "DESIRED_COUNT=1"               >> "$GITHUB_ENV"
+            echo "tf_env=dev"                    >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── AWS authentication ───────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-2
+
+      # ── Preserve running image tag ───────────────────────────────────────
+      # Read the currently deployed image tag from ECS so that an infra-only
+      # change does not accidentally alter the running application version.
+      # Falls back to "placeholder" when the task definition does not exist yet
+      # (e.g. on the very first apply).
+      - name: Read current image tag from ECS
+        run: |
+          IMAGE_TAG=$(aws ecs describe-task-definition \
+            --task-definition "ebird-llm-${{ env.TF_ENV }}" \
+            --query 'taskDefinition.containerDefinitions[0].image' \
+            --output text 2>/dev/null \
+            | awk -F: '{print $NF}') || true
+          echo "IMAGE_TAG=${IMAGE_TAG:-placeholder}" >> "$GITHUB_ENV"
+
+      # ── Generate tfvars (not committed — built at runtime) ───────────────
+      - name: Generate tfvars
+        working-directory: infra
+        run: |
+          cat > "${{ env.TFVARS_FILE }}" <<EOF
+          environment   = "${{ env.TF_ENV }}"
+          vpc_cidr      = "${{ env.VPC_CIDR }}"
+          task_cpu      = ${{ env.TASK_CPU }}
+          task_memory   = ${{ env.TASK_MEMORY }}
+          desired_count = ${{ env.DESIRED_COUNT }}
+          image_tag     = "${{ env.IMAGE_TAG }}"
+          EOF
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init -backend-config=${{ env.BACKEND_FILE }}
+
+      # ── Bootstrap IAM ────────────────────────────────────────────────────
+      # Narrow targeted apply scoped to the IAM policy only.
+      # Grants dynamodb:DescribeTimeToLive so the subsequent plan can refresh
+      # existing DynamoDB table state without an AccessDeniedException.
+      # This becomes a no-op once the permissions are already in sync.
+      - name: Bootstrap IAM policy
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve \
+            -target=aws_iam_role_policy.github_deploy \
+            -var-file="${{ env.TFVARS_FILE }}"
+
+      # ── Plan ─────────────────────────────────────────────────────────────
+      # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present
+      - name: Terraform plan
+        id: plan
+        working-directory: infra
+        run: |
+          set +e
+          terraform plan -detailed-exitcode -out=tfplan \
+            -var-file="${{ env.TFVARS_FILE }}" 2>&1 | tee plan.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          set -e
+
+      # ── Publish results ──────────────────────────────────────────────────
+      - name: Publish plan to workflow summary
+        working-directory: infra
+        run: |
+          echo "## Terraform Plan — \`${{ env.TF_ENV }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```hcl' >> "$GITHUB_STEP_SUMMARY"
+          cat plan.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post plan as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const raw  = fs.readFileSync('infra/plan.txt', 'utf8');
+            // GitHub comment body limit is 65536 chars; truncate if needed.
+            const body = raw.length > 60000
+              ? raw.slice(0, 60000) + '\n\n_(truncated — see full plan in the workflow summary)_'
+              : raw;
+            const comment = `## Terraform Plan — \`${{ env.TF_ENV }}\`\n\`\`\`hcl\n${body}\n\`\`\``;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number,
+            });
+            const prev = comments.find(c => c.body.startsWith('## Terraform Plan'));
+            if (prev) {
+              await github.rest.issues.updateComment({
+                ...context.repo, comment_id: prev.id, body: comment,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: context.issue.number, body: comment,
+              });
+            }
+
+      # Upload the saved plan so the apply job uses the exact reviewed plan.
+      # exit_code 1 = plan error; skip upload in that case.
+      - name: Upload plan artifact
+        if: steps.plan.outputs.exit_code != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ env.TF_ENV }}-${{ github.sha }}
+          path: infra/tfplan
+          retention-days: 7
+
+      - name: Fail on plan error
+        if: steps.plan.outputs.exit_code == '1'
+        run: exit 1
+
+  # ---------------------------------------------------------------------------
+  # Apply — only on push events, paused for human review via GitHub Environment
+  #
+  # One-time setup (per repo):
+  #   GitHub → Settings → Environments → Create "terraform-apply"
+  #   → Required reviewers → add yourself / your team
+  #
+  # The job pauses here until an authorized reviewer clicks "Approve and deploy"
+  # in the GitHub Actions UI.  The exact plan that was reviewed is then applied.
+  # ---------------------------------------------------------------------------
+  apply:
+    name: Apply
+    needs: plan
+    # Only apply on direct pushes and when the plan step succeeded.
+    # exit_code 0 = no changes (skip apply), 2 = changes present (proceed).
+    if: |
+      github.event_name == 'push' &&
+      needs.plan.result == 'success' &&
+      needs.plan.outputs.exit_code == '2'
+    runs-on: ubuntu-latest
+
+    environment: terraform-apply  # requires manual approval
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set deployment environment
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          if [[ "$BRANCH" == "master" || "$BRANCH" == "main" ]]; then
+            echo "TF_ENV=prod"                   >> "$GITHUB_ENV"
+            echo "BACKEND_FILE=backend-prod.hcl" >> "$GITHUB_ENV"
+          else
+            echo "TF_ENV=dev"                    >> "$GITHUB_ENV"
+            echo "BACKEND_FILE=backend-dev.hcl"  >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ env.TF_ENV }}-${{ github.sha }}
+          path: infra/
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init -backend-config=${{ env.BACKEND_FILE }}
+
+      # Applies exactly the plan that was reviewed — no -auto-approve flag
+      # needed because applying a saved plan file skips the interactive prompt.
+      - name: Terraform apply saved plan
+        working-directory: infra
+        run: terraform apply tfplan

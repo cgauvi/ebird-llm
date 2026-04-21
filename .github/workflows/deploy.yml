@@ -2,11 +2,21 @@ name: Deploy
 
 on:
   # Triggers only after Unit Tests pass on the deployment branches.
-  # Using workflow_run ensures tests always gate deploys, even on direct pushes.
+  # workflow_run fires regardless of the paths filter on the source workflow,
+  # so we check whether the triggering run involved app/src changes by
+  # inspecting the conclusion and relying on the test workflow's own paths
+  # filter — if tests were skipped (no relevant files changed) this workflow
+  # will not be triggered at all.
   workflow_run:
     workflows: ["Unit Tests"]
     branches: ["master", "main", "develop"]
     types: [completed]
+
+# One live deployment per environment at a time.
+# cancel-in-progress: false ensures we never abort a deploy already in flight.
+concurrency:
+  group: deploy-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -29,41 +39,15 @@ jobs:
 
       # ── Determine environment from branch ─────────────────────────────────
       - name: Set deployment environment
-        id: env
         run: |
           BRANCH="${{ github.event.workflow_run.head_branch }}"
           if [[ "$BRANCH" == "master" ]]; then
-            echo "TF_ENV=prod"                   >> "$GITHUB_ENV"
-            echo "BACKEND_FILE=backend-prod.hcl" >> "$GITHUB_ENV"
-            echo "TFVARS_FILE=prod.tfvars"        >> "$GITHUB_ENV"
-            echo "VPC_CIDR=10.1.0.0/16"          >> "$GITHUB_ENV"
-            echo "TASK_CPU=1024"                 >> "$GITHUB_ENV"
-            echo "TASK_MEMORY=2048"              >> "$GITHUB_ENV"
-            echo "DESIRED_COUNT=1"               >> "$GITHUB_ENV"
+            echo "TF_ENV=prod" >> "$GITHUB_ENV"
           else
-            echo "TF_ENV=dev"                    >> "$GITHUB_ENV"
-            echo "BACKEND_FILE=backend-dev.hcl"  >> "$GITHUB_ENV"
-            echo "TFVARS_FILE=dev.tfvars"         >> "$GITHUB_ENV"
-            echo "VPC_CIDR=10.0.0.0/16"          >> "$GITHUB_ENV"
-            echo "TASK_CPU=512"                  >> "$GITHUB_ENV"
-            echo "TASK_MEMORY=1024"              >> "$GITHUB_ENV"
-            echo "DESIRED_COUNT=1"               >> "$GITHUB_ENV"
+            echo "TF_ENV=dev"  >> "$GITHUB_ENV"
           fi
           # Use the short SHA as the image tag for traceability
           echo "IMAGE_TAG=$(echo '${{ github.event.workflow_run.head_sha }}' | cut -c1-7)" >> "$GITHUB_ENV"
-
-      # ── Generate tfvars file (not committed — built from workflow values) ──
-      - name: Generate tfvars
-        working-directory: infra
-        run: |
-          cat > "${{ env.TFVARS_FILE }}" <<EOF
-          environment   = "${{ env.TF_ENV }}"
-          vpc_cidr      = "${{ env.VPC_CIDR }}"
-          task_cpu      = ${{ env.TASK_CPU }}
-          task_memory   = ${{ env.TASK_MEMORY }}
-          desired_count = ${{ env.DESIRED_COUNT }}
-          image_tag     = "${{ env.IMAGE_TAG }}"
-          EOF
 
       # ── AWS authentication (OIDC — no long-lived credentials stored) ───────
       - name: Configure AWS credentials
@@ -94,31 +78,42 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ── Terraform apply ────────────────────────────────────────────────────
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.5"
-
-      - name: Terraform init
-        working-directory: infra
-        run: terraform init -backend-config=${{ env.BACKEND_FILE }}
-
-      # Apply IAM permissions first to avoid bootstrapping issues where
-      # Terraform needs a permission (e.g. dynamodb:DescribeTimeToLive) to
-      # refresh existing resources, but that permission is only granted by
-      # this very apply.  Targeting the IAM policy resource only refreshes
-      # IAM state, not the DynamoDB tables, so it succeeds even before the
-      # full permissions are in place.
-      - name: Terraform apply (IAM policy first)
-        working-directory: infra
+      # ── ECS deploy — update task definition with the new image ────────────
+      # Infrastructure changes (cluster, VPC, IAM, …) are managed separately
+      # in infra.yml.  This step only registers a new task-definition revision
+      # with the updated image tag and points the service at it.
+      #
+      # Prerequisite: infra.yml must have run at least once to create the
+      # ECS cluster and service before this step can succeed.
+      - name: Update ECS task definition
+        env:
+          NEW_IMAGE: ${{ steps.ecr_login.outputs.registry }}/ebird-llm-${{ env.TF_ENV }}:${{ env.IMAGE_TAG }}
+          CLUSTER: ebird-llm-${{ env.TF_ENV }}
+          SERVICE: ebird-llm-${{ env.TF_ENV }}
         run: |
-          terraform apply -auto-approve \
-            -target=aws_iam_role_policy.github_deploy \
-            -var-file="${{ env.TFVARS_FILE }}"
+          # Read the active task definition and strip fields that are
+          # rejected by register-task-definition (read-only metadata).
+          NEW_DEF=$(aws ecs describe-task-definition \
+            --task-definition "$CLUSTER" \
+            --query 'taskDefinition' \
+            --output json \
+            | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                      .compatibilities, .registeredAt, .registeredBy)
+                  | .containerDefinitions[0].image = $ENV.NEW_IMAGE')
 
-      - name: Terraform apply
-        working-directory: infra
-        run: |
-          terraform apply -auto-approve \
-            -var-file="${{ env.TFVARS_FILE }}"
+          # Register new revision with the updated image tag
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "Registered task definition: $NEW_ARN"
+
+          # Point the service at the new revision
+          aws ecs update-service \
+            --cluster  "$CLUSTER" \
+            --service  "$SERVICE" \
+            --task-definition "$NEW_ARN" \
+            --region us-east-2
+
+          echo "Deployed image: $NEW_IMAGE"
