@@ -82,7 +82,8 @@ def _return_obs(records: list, note: str | None = None) -> str:
             )
 
     parts.append(
-        f'Call create_sightings_map or create_historical_chart with '
+        f'Call show_observations_table to display the data as a table, '
+        f'create_sightings_map or create_historical_chart with '
         f'observations_file="{obs_file}" to visualize.'
     )
     return " ".join(parts)

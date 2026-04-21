@@ -6,7 +6,9 @@ import folium
 import pytest
 from langchain_core.tools import ToolException
 
-from src.tools.viz_tools import create_historical_chart, create_sightings_map
+import pandas as pd
+
+from src.tools.viz_tools import create_historical_chart, create_sightings_map, show_observations_table
 from src.utils.state import VizBuffer, clear_viz_buffer
 
 # ---------------------------------------------------------------------------
@@ -244,6 +246,128 @@ class TestCreateHistoricalChart:
             {"observations_json": json.dumps(SAMPLE_OBS), "chart_type": "bar"}
         )
         assert VizBuffer["table"] is None
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# show_observations_table
+# ---------------------------------------------------------------------------
+
+
+class TestShowObservationsTable:
+    def test_sets_vizbuffer_type_to_dataframe(self):
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        assert VizBuffer["type"] == "dataframe"
+
+    def test_vizbuffer_data_is_list_of_dicts(self):
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        assert isinstance(VizBuffer["data"], list)
+        assert all(isinstance(r, dict) for r in VizBuffer["data"])
+
+    def test_row_count_matches_input(self):
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        assert len(VizBuffer["data"]) == len(SAMPLE_OBS)
+
+    def test_all_input_records_present(self):
+        """Every observation must appear in the output (no rows dropped)."""
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        rendered_species = {r["Species"] for r in VizBuffer["data"]}
+        source_species = {o["comName"] for o in SAMPLE_OBS}
+        assert rendered_species == source_species
+
+    def test_columns_renamed_to_friendly_labels(self):
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        row = VizBuffer["data"][0]
+        assert "Species" in row,          "comName not renamed to 'Species'"
+        assert "Scientific Name" in row,  "sciName not renamed to 'Scientific Name'"
+        assert "Count" in row,            "howMany not renamed to 'Count'"
+        assert "Date" in row,             "obsDt not renamed to 'Date'"
+        assert "Location" in row,         "locName not renamed to 'Location'"
+
+    def test_raw_column_names_absent(self):
+        """Original eBird field names must not appear after renaming."""
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        row = VizBuffer["data"][0]
+        for raw in ("comName", "sciName", "howMany", "obsDt", "locName"):
+            assert raw not in row, f"Raw column '{raw}' should have been renamed"
+
+    def test_howmany_coerced_to_int(self):
+        obs = [{**SAMPLE_OBS[0], "howMany": None}]
+        show_observations_table.invoke({"observations_json": json.dumps(obs)})
+        count_val = VizBuffer["data"][0]["Count"]
+        assert isinstance(count_val, int)
+        assert count_val == 1
+
+    def test_title_set_with_record_count(self):
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        assert VizBuffer["title"] is not None
+        assert str(len(SAMPLE_OBS)) in VizBuffer["title"]
+
+    def test_table_key_is_none(self):
+        """VizBuffer['table'] is unused by this tool and must stay None."""
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        assert VizBuffer["table"] is None
+
+    def test_returns_confirmation_string_with_count(self):
+        result = show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        assert "table" in result.lower()
+        assert str(len(SAMPLE_OBS)) in result
+
+    def test_uses_session_cache_when_json_empty(self):
+        """Calling with no observations_json must fall back to the session cache."""
+        from src.utils.state import set_obs_dataframe
+        import pandas as pd
+        set_obs_dataframe(pd.DataFrame(SAMPLE_OBS))
+        show_observations_table.invoke({})
+        assert VizBuffer["type"] == "dataframe"
+        assert len(VizBuffer["data"]) == len(SAMPLE_OBS)
+
+    def test_empty_observations_raises_tool_exception(self):
+        with pytest.raises(ToolException):
+            show_observations_table.invoke({"observations_json": "[]"})
+
+    def test_invalid_json_raises_tool_exception(self):
+        with pytest.raises(ToolException, match="not valid JSON"):
+            show_observations_table.invoke({"observations_json": "not-json"})
+
+    def test_non_list_json_raises_tool_exception(self):
+        with pytest.raises(ToolException, match="JSON array"):
+            show_observations_table.invoke({"observations_json": '{"key": "value"}'})
+
+    def test_preferred_column_order(self):
+        """Species and Count should appear before location / lat / lng in the output."""
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        df = pd.DataFrame(VizBuffer["data"])
+        cols = list(df.columns)
+        assert cols.index("Species") < cols.index("Lat"), (
+            "'Species' should appear before 'Lat' in the table"
+        )
+        assert cols.index("Count") < cols.index("Lng"), (
+            "'Count' should appear before 'Lng' in the table"
+        )
+
+    def test_large_dataset_all_rows_preserved(self):
+        """Unlike the map tool (capped at 10), the table must keep all rows."""
+        large_obs = [
+            {**SAMPLE_OBS[i % 2], "comName": f"Species {i}", "locId": f"L{i}"}
+            for i in range(50)
+        ]
+        show_observations_table.invoke({"observations_json": json.dumps(large_obs)})
+        assert len(VizBuffer["data"]) == 50
+
+    def test_single_observation_works(self):
+        single = [SAMPLE_OBS[0]]
+        result = show_observations_table.invoke({"observations_json": json.dumps(single)})
+        assert VizBuffer["type"] == "dataframe"
+        assert len(VizBuffer["data"]) == 1
+
+    def test_vizbuffer_overwritten_on_second_call(self):
+        show_observations_table.invoke({"observations_json": json.dumps(SAMPLE_OBS)})
+        first_data = VizBuffer["data"]
+        single = [SAMPLE_OBS[0]]
+        show_observations_table.invoke({"observations_json": json.dumps(single)})
+        assert len(VizBuffer["data"]) == 1
+        assert VizBuffer["data"] is not first_data
 
 
 # ---------------------------------------------------------------------------

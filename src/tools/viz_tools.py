@@ -447,12 +447,84 @@ def create_historical_chart(
 
 
 # ---------------------------------------------------------------------------
+# Tool 9 — Observations data table
+# ---------------------------------------------------------------------------
+
+# Human-friendly column labels shown in the viz panel
+_OBS_COLUMN_LABELS: dict[str, str] = {
+    "comName":          "Species",
+    "sciName":          "Scientific Name",
+    "howMany":          "Count",
+    "obsDt":            "Date",
+    "locName":          "Location",
+    "lat":              "Lat",
+    "lng":              "Lng",
+    "obsValid":         "Valid",
+    "obsReviewed":      "Reviewed",
+    "locationPrivate":  "Private",
+    "speciesCode":      "Code",
+    "locId":            "Loc ID",
+    "subId":            "Checklist ID",
+}
+
+# Preferred column order (columns not listed appear after these)
+_OBS_COLUMN_ORDER = [
+    "comName", "sciName", "howMany", "obsDt", "locName",
+    "lat", "lng", "obsValid", "obsReviewed", "locationPrivate",
+    "speciesCode", "locId", "subId",
+]
+
+
+@tool
+def show_observations_table(observations_json: str = "") -> str:
+    """Display the most recent observation data as an interactive table in the viz panel.
+
+    Call this tool whenever the user asks to *see*, *show*, *display*, *print*,
+    or *view* the raw observation data, a table, or a dataframe.  It renders all
+    retrieved records as a sortable, searchable dataframe in the right-hand panel.
+
+    Args:
+        observations_json: JSON array of observation records returned by an
+            eBird data tool.  Leave empty to use the session cache automatically.
+
+    Returns:
+        A short confirmation string, e.g. "Table displayed with 33 observations."
+        The table is rendered in the Streamlit right panel automatically.
+    """
+    records = parse_observations_json(observations_json) if observations_json.strip() else _load_from_cache()
+    if not records:
+        raise ToolException("No observation data available — run an eBird data tool first.")
+
+    df = pd.DataFrame(records)
+
+    # Normalise count column
+    if "howMany" in df.columns:
+        df["howMany"] = pd.to_numeric(df["howMany"], errors="coerce").fillna(1).astype(int)
+
+    # Re-order columns: preferred order first, then any extras
+    ordered = [c for c in _OBS_COLUMN_ORDER if c in df.columns]
+    extras  = [c for c in df.columns if c not in ordered]
+    df = df[ordered + extras]
+
+    # Rename to human-friendly labels
+    df = df.rename(columns=_OBS_COLUMN_LABELS)
+
+    VizBuffer["type"]  = "dataframe"
+    VizBuffer["data"]  = df.to_dict(orient="records")
+    VizBuffer["title"] = f"Observations ({len(records)} records)"
+    VizBuffer["table"] = None  # not used for this type
+
+    return f"Table displayed with {len(records)} observations."
+
+
+# ---------------------------------------------------------------------------
 # Public list used by agent.py
 # ---------------------------------------------------------------------------
 
 VIZ_TOOLS = [
     create_sightings_map,
     create_historical_chart,
+    show_observations_table,
 ]
 
 # %%

@@ -34,7 +34,9 @@ from src.tools.ebird_tools import (
     get_recent_observations_by_location,
     get_recent_observations_by_region,
 )
-from src.tools.viz_tools import create_historical_chart, create_sightings_map
+import pandas as pd
+
+from src.tools.viz_tools import create_historical_chart, create_sightings_map, show_observations_table
 from src.utils.state import VizBuffer, clear_viz_buffer, get_last_obs_file
 
 # ---------------------------------------------------------------------------
@@ -593,4 +595,243 @@ class TestLLMOutputMapConsistency:
         assert non_goose, (
             "Expected non-goose species in mixed data but found none — "
             "the goose-only assertion guard is broken."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5. show_observations_table consistency
+#    The dataframe rendered in VizBuffer must faithfully reflect the API data:
+#    no rows dropped, no species fabricated, counts correct, columns renamed.
+# ---------------------------------------------------------------------------
+
+
+def _df_species(vizbuffer_data: list[dict]) -> set[str]:
+    """Set of 'Species' values from VizBuffer['data'] (dataframe records)."""
+    return {r["Species"] for r in vizbuffer_data}
+
+
+def _df_record_count(return_value: str) -> int | None:
+    """Parse the integer observation count from a show_observations_table return string."""
+    m = re.search(r"(\d+)\s+observations?", return_value, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+class TestDataframeConsistency:
+    """show_observations_table output ↔ eBird API data must be identical."""
+
+    # ── Species coverage ────────────────────────────────────────────────────
+
+    def test_recent_location_to_table_species_match(self, mock_client):
+        """Every species from the API must appear in the rendered dataframe."""
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        show_observations_table.invoke({})
+
+        assert _df_species(VizBuffer["data"]) == {o["comName"] for o in RECENT_OBS}
+
+    def test_recent_region_to_table_species_match(self, mock_client):
+        mock_client.recent_observations_by_region.return_value = RECENT_OBS
+
+        get_recent_observations_by_region.invoke({"region_code": "US-NY"})
+        show_observations_table.invoke({})
+
+        assert _df_species(VizBuffer["data"]) == {o["comName"] for o in RECENT_OBS}
+
+    def test_historic_to_table_species_match(self, mock_client):
+        mock_client.historic_observations.return_value = HISTORIC_OBS
+
+        get_historic_observations.invoke(
+            {"region_code": "US-MA", "year": 2024, "month": 5, "day": 1}
+        )
+        show_observations_table.invoke({})
+
+        assert _df_species(VizBuffer["data"]) == {o["comName"] for o in HISTORIC_OBS}
+
+    def test_notable_obs_to_table_species_match(self, mock_client):
+        mock_client.notable_observations_by_location.return_value = RECENT_OBS
+
+        get_notable_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        show_observations_table.invoke({})
+
+        assert _df_species(VizBuffer["data"]) == {o["comName"] for o in RECENT_OBS}
+
+    # ── Row-count integrity ──────────────────────────────────────────────────
+
+    def test_table_row_count_equals_api_record_count(self, mock_client):
+        """Unlike the map (capped at 10), the table must show all API records."""
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        result = show_observations_table.invoke({})
+
+        assert len(VizBuffer["data"]) == len(RECENT_OBS)
+        reported = _df_record_count(result)
+        assert reported == len(RECENT_OBS)
+
+    def test_table_not_capped_at_ten_rows(self, mock_client):
+        """Twelve records must all appear — map caps at 10 but table must not."""
+        twelve_obs = [
+            {**RECENT_OBS[i % 2], "comName": f"Species {i}", "locId": f"L{i}"}
+            for i in range(12)
+        ]
+        mock_client.recent_observations_by_location.return_value = twelve_obs
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        show_observations_table.invoke({})
+
+        assert len(VizBuffer["data"]) == 12, (
+            "Table must not be capped at 10; all 12 records should appear."
+        )
+
+    def test_no_extra_records_fabricated(self, mock_client):
+        """Table must not contain records beyond what the API returned."""
+        mock_client.historic_observations.return_value = HISTORIC_OBS
+
+        get_historic_observations.invoke(
+            {"region_code": "US-MA", "year": 2024, "month": 5, "day": 1}
+        )
+        show_observations_table.invoke({})
+
+        api_species = {o["comName"] for o in HISTORIC_OBS}
+        fabricated = _df_species(VizBuffer["data"]) - api_species
+        assert not fabricated, (
+            f"Dataframe contains species not returned by the API: {fabricated}"
+        )
+
+    # ── Column labelling ─────────────────────────────────────────────────────
+
+    def test_table_has_friendly_column_names(self, mock_client):
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        show_observations_table.invoke({})
+
+        row = VizBuffer["data"][0]
+        for col in ("Species", "Count", "Location", "Date"):
+            assert col in row, f"Expected friendly column '{col}' not found in table row"
+
+    def test_table_has_no_raw_ebird_column_names(self, mock_client):
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        show_observations_table.invoke({})
+
+        row = VizBuffer["data"][0]
+        for raw in ("comName", "sciName", "howMany", "obsDt", "locName"):
+            assert raw not in row, (
+                f"Raw eBird column '{raw}' should have been renamed in the table"
+            )
+
+    # ── VizBuffer state ──────────────────────────────────────────────────────
+
+    def test_vizbuffer_type_is_dataframe(self, mock_client):
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        show_observations_table.invoke({})
+
+        assert VizBuffer["type"] == "dataframe"
+
+    def test_vizbuffer_data_is_renderable_as_dataframe(self, mock_client):
+        """VizBuffer['data'] must be a list of dicts that pandas can read."""
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        show_observations_table.invoke({})
+
+        df = pd.DataFrame(VizBuffer["data"])
+        assert not df.empty
+        assert len(df) == len(RECENT_OBS)
+
+    def test_vizbuffer_table_key_is_none(self, mock_client):
+        """VizBuffer['table'] is only used by the map tool; must be None here."""
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        show_observations_table.invoke({})
+
+        assert VizBuffer["table"] is None
+
+    def test_vizbuffer_title_contains_record_count(self, mock_client):
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+        show_observations_table.invoke({})
+
+        assert str(len(RECENT_OBS)) in VizBuffer["title"]
+
+    # ── Date consistency ─────────────────────────────────────────────────────
+
+    def test_table_dates_match_historic_request(self, mock_client):
+        """Every date in the table must equal the requested historic date."""
+        mock_client.historic_observations.return_value = HISTORIC_OBS
+
+        get_historic_observations.invoke(
+            {"region_code": "US-MA", "year": 2024, "month": 5, "day": 1}
+        )
+        show_observations_table.invoke({})
+
+        for row in VizBuffer["data"]:
+            raw_date = row.get("Date", "")
+            assert raw_date.startswith("2024-05-01"), (
+                f"Expected date 2024-05-01 but found '{raw_date}' in dataframe row"
+            )
+
+    def test_table_dates_within_recent_window(self, mock_client):
+        """Dates in the table from a recent-obs call must fall within days_back."""
+        days_back = 7
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 40.78, "lng": -73.97, "days_back": days_back}
+        )
+        show_observations_table.invoke({})
+
+        cutoff = _TODAY - datetime.timedelta(days=days_back)
+        for row in VizBuffer["data"]:
+            d = datetime.date.fromisoformat(row["Date"][:10])
+            assert d >= cutoff, (
+                f"Dataframe contains date {d} which is outside the {days_back}-day window"
+            )
+
+    # ── Map ↔ table consistency (same underlying data) ────────────────────────
+
+    def test_table_and_map_show_same_species(self, mock_client):
+        """show_observations_table and create_sightings_map must reflect the
+        same set of species when called after the same eBird tool."""
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+
+        show_observations_table.invoke({})
+        table_species = _df_species(VizBuffer["data"])
+
+        create_sightings_map.invoke({})
+        map_species = _map_species(VizBuffer["table"])
+
+        assert table_species == map_species, (
+            f"Table species {table_species} differ from map species {map_species}"
+        )
+
+    def test_table_row_count_gte_map_table_row_count(self, mock_client):
+        """The dataframe (uncapped) must have at least as many rows as the map
+        table (which is capped at 10)."""
+        many_obs = [
+            {**RECENT_OBS[i % 2], "comName": f"Species {i}", "locId": f"L{i}"}
+            for i in range(12)
+        ]
+        mock_client.recent_observations_by_location.return_value = many_obs
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+
+        show_observations_table.invoke({})
+        table_count = len(VizBuffer["data"])
+
+        create_sightings_map.invoke({})
+        map_table_count = len(VizBuffer["table"])
+
+        assert table_count >= map_table_count, (
+            f"Dataframe ({table_count} rows) should have at least as many rows "
+            f"as the map table ({map_table_count} rows)"
         )

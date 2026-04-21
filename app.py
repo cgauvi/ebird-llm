@@ -314,6 +314,16 @@ with viz_col:
         except Exception as exc:
             st.error(f"Could not render chart: {exc}")
 
+    elif snap["type"] == "dataframe":
+        if snap.get("data"):
+            import pandas as pd
+            df = pd.DataFrame(snap["data"])
+            if snap.get("title"):
+                st.caption(snap["title"])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.error("Dataframe data is empty.")
+
     else:
         st.info(
             "Ask the assistant about bird sightings and a map or chart will appear here."
