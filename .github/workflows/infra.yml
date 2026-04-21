@@ -233,6 +233,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~1.5"
+          terraform_wrapper: false   # ← add this
 
       - name: Download plan artifact
         uses: actions/download-artifact@v4
