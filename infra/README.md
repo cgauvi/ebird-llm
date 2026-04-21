@@ -52,7 +52,7 @@ Internet
 | `ecs.tf` | SSM parameters (API keys + Cognito + DynamoDB prefix), CloudWatch log group, ECS cluster, task definition, service |
 | `alb.tf` | ALB, target group, HTTP listener |
 | `auth_usage.tf` | Cognito User Pool + app client, DynamoDB `usage` + `llm-calls` tables, IAM policy for task role |
-| `oidc.tf` | GitHub Actions OIDC provider, deploy IAM role + policy |
+| `oidc.tf` | Data sources referencing the bootstrap-managed OIDC provider and deploy role |
 | `outputs.tf` | `app_url`, `cognito_user_pool_id`, `cognito_client_id`, `dynamodb_usage_table`, `dynamodb_llm_calls_table`, `set_secrets_commands`, `docker_push_commands`, `github_deploy_role_arn` |
 
 All resources are namespaced by `ebird-llm-<environment>` (e.g. `ebird-llm-dev`,
@@ -90,23 +90,19 @@ in both files.
 
 ### Step 1 — Bootstrap the GitHub OIDC role (enables CI/CD)
 
-The OIDC role in `oidc.tf` allows GitHub Actions to deploy without storing
-long-lived AWS credentials. Apply it once from local credentials before the
-pipeline is active:
+The OIDC provider, deploy role, and deploy policy are managed in
+`infra/bootstrap/` alongside the state bucket. They require admin credentials
+and must exist before the CI/CD pipeline can authenticate. Run this once:
 
 ```bash
-cd infra
-terraform init -backend-config=backend-dev.hcl
-terraform apply -var-file=dev.tfvars \
-  -target=aws_iam_openid_connect_provider.github \
-  -target=aws_iam_role.github_deploy \
-  -target=aws_iam_role_policy.github_deploy
+cd infra/bootstrap
+terraform apply
+# Outputs: github_deploy_role_arn = "arn:aws:iam::..."
 ```
 
 Copy the role ARN into GitHub:
 ```bash
-terraform output github_deploy_role_arn
-# → GitHub repo → Settings → Secrets → Actions → New secret: AWS_DEPLOY_ROLE_ARN
+# GitHub repo → Settings → Secrets → Actions → New secret: AWS_DEPLOY_ROLE_ARN
 ```
 
 This bootstrap is per AWS account and repository, not per environment.
@@ -119,9 +115,9 @@ In the current setup:
 - Dev and prod are separated by different `.tfvars` values and different
   backend state files, not by separate GitHub OIDC roles
 
-That means you do **not** need a second OIDC bootstrap just because you are
-deploying prod. You only need a separate bootstrap if you later move prod to a
-different AWS account or decide to use a distinct prod deploy role.
+You do **not** need a second OIDC bootstrap just because you are deploying
+prod. You only need a separate bootstrap if you later move prod to a different
+AWS account or decide to use a distinct prod deploy role.
 
 ### If CI deploy fails with AccessDenied during terraform plan/apply
 
@@ -183,15 +179,11 @@ Notes:
   Terraform apply with an admin-capable AWS identity targeting the OIDC role
   resources first.
 
-Bootstrap command for that one-time fix:
+If the deploy role policy is out of date, update it locally with admin credentials:
 
 ```bash
-cd infra
-terraform init -backend-config=backend-dev.hcl
-terraform apply -var-file=dev.tfvars \
-  -target=aws_iam_openid_connect_provider.github \
-  -target=aws_iam_role.github_deploy \
-  -target=aws_iam_role_policy.github_deploy
+cd infra/bootstrap
+terraform apply
 ```
 
 After that bootstrap, normal CI/CD can update the rest of the stack.
@@ -303,7 +295,6 @@ The deploy workflow (`.github/workflows/deploy.yml`) only runs after the
 | `task_memory` | `2048` | Fargate memory (MiB) |
 | `desired_count` | `1` | Number of running ECS tasks (set to `0` to pause) |
 | `streamlit_port` | `8501` | Container port Streamlit listens on |
-| `github_repo` | `cgauvi/ebird-llm` | GitHub repo for OIDC trust policy |
 
 ---
 

@@ -117,3 +117,14 @@ jobs:
             --region us-east-2
 
           echo "Deployed image: $NEW_IMAGE"
+
+      - name: Print app URL
+        run: |
+          DNS=$(aws elbv2 describe-load-balancers \
+            --names "ebird-llm-${{ env.TF_ENV }}" \
+            --query "LoadBalancers[0].DNSName" \
+            --output text)
+          APP_URL="http://$DNS"
+          echo "App URL: $APP_URL"
+          echo "## App URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "$APP_URL" >> "$GITHUB_STEP_SUMMARY"

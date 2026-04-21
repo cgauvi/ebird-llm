@@ -249,3 +249,11 @@ jobs:
       - name: Terraform apply saved plan
         working-directory: infra
         run: terraform apply tfplan
+
+      - name: Print app URL
+        working-directory: infra
+        run: |
+          APP_URL=$(terraform output -raw app_url)
+          echo "App URL: $APP_URL"
+          echo "## App URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "$APP_URL" >> "$GITHUB_STEP_SUMMARY"

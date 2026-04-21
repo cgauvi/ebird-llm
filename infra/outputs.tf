@@ -68,7 +68,7 @@ output "docker_push_commands" {
 
 output "github_deploy_role_arn" {
   description = "ARN of the IAM role assumed by GitHub Actions via OIDC — copy into GitHub secret AWS_DEPLOY_ROLE_ARN"
-  value       = aws_iam_role.github_deploy.arn
+  value       = data.aws_iam_role.github_deploy.arn
 }
 
 # ---------------------------------------------------------------------------
