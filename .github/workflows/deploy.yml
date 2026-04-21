@@ -104,6 +104,19 @@ jobs:
         working-directory: infra
         run: terraform init -backend-config=${{ env.BACKEND_FILE }}
 
+      # Apply IAM permissions first to avoid bootstrapping issues where
+      # Terraform needs a permission (e.g. dynamodb:DescribeTimeToLive) to
+      # refresh existing resources, but that permission is only granted by
+      # this very apply.  Targeting the IAM policy resource only refreshes
+      # IAM state, not the DynamoDB tables, so it succeeds even before the
+      # full permissions are in place.
+      - name: Terraform apply (IAM policy first)
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve \
+            -target=aws_iam_role_policy.github_deploy \
+            -var-file="${{ env.TFVARS_FILE }}"
+
       - name: Terraform apply
         working-directory: infra
         run: |
