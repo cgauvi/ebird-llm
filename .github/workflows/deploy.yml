@@ -41,7 +41,7 @@ jobs:
       - name: Set deployment environment
         run: |
           BRANCH="${{ github.event.workflow_run.head_branch }}"
-          if [[ "$BRANCH" == "master" ]]; then
+          if [[ "$BRANCH" == "master" || "$BRANCH" == "main" ]]; then
             echo "TF_ENV=prod" >> "$GITHUB_ENV"
           else
             echo "TF_ENV=dev"  >> "$GITHUB_ENV"
@@ -71,10 +71,14 @@ jobs:
           file: Dockerfile
           target: runtime
           push: true
-          # Tag with both the short SHA (immutable, traceable) and env label
+          # Three tags per push:
+          #   <sha>       — immutable, for traceability
+          #   <env>-latest — env-scoped mutable pointer
+          #   latest      — keeps Terraform's fallback image_tag resolvable
           tags: |
             ${{ steps.ecr_login.outputs.registry }}/ebird-llm-${{ env.TF_ENV }}:${{ env.IMAGE_TAG }}
             ${{ steps.ecr_login.outputs.registry }}/ebird-llm-${{ env.TF_ENV }}:${{ env.TF_ENV }}-latest
+            ${{ steps.ecr_login.outputs.registry }}/ebird-llm-${{ env.TF_ENV }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

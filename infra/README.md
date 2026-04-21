@@ -222,13 +222,9 @@ shared GitHub deploy role already has the correct permissions.
 ### Set real API key values in SSM
 
 After the first apply, SSM parameters are created with `PLACEHOLDER` values.
-Populate them before starting the ECS service:
+Populate them before starting the ECS service.
 
-```bash
-terraform output -raw set_secrets_commands
-```
-
-Which produces:
+**Dev:**
 
 ```bash
 aws ssm put-parameter \
@@ -242,8 +238,41 @@ aws ssm put-parameter \
   --type SecureString --overwrite --region us-east-2
 ```
 
+**Prod:**
+
+```bash
+aws ssm put-parameter \
+  --name "/ebird-llm-prod/EBIRD_API_KEY" \
+  --value "<YOUR_EBIRD_API_KEY>" \
+  --type SecureString --overwrite --region us-east-2
+
+aws ssm put-parameter \
+  --name "/ebird-llm-prod/HUGGINGFACE_API_TOKEN" \
+  --value "<YOUR_HUGGINGFACE_API_TOKEN>" \
+  --type SecureString --overwrite --region us-east-2
+```
+
+Alternatively, let Terraform print the commands for the current workspace:
+
+```bash
+terraform output -raw set_secrets_commands
+```
+
 > The `lifecycle { ignore_changes = [value] }` block means Terraform will
 > never revert values you set manually.
+
+> Secrets are injected into the container at task startup. After updating an
+> SSM value, force a new ECS deployment so running tasks pick up the change:
+>
+> ```bash
+> # Dev
+> aws ecs update-service --cluster ebird-llm-dev --service ebird-llm-dev \
+>   --force-new-deployment --region us-east-2
+>
+> # Prod
+> aws ecs update-service --cluster ebird-llm-prod --service ebird-llm-prod \
+>   --force-new-deployment --region us-east-2
+> ```
 
 ### Build and push the Docker image (manual)
 
@@ -271,13 +300,21 @@ automated:
 | Branch | Trigger | Deploys to |
 |---|---|---|
 | `develop` | push | `ebird-llm-dev` |
-| `master` | push | `ebird-llm-prod` |
+| `main` / `master` | push | `ebird-llm-prod` |
 
 The deploy workflow (`.github/workflows/deploy.yml`) only runs after the
 `Unit Tests` workflow succeeds. It:
 
-1. Builds the `runtime` Docker stage and pushes to ECR tagged with the git SHA
-2. Runs `terraform apply` with the environment-specific `-backend-config` and `-var-file`
+1. Builds the `runtime` Docker stage and pushes to ECR with three tags:
+   - `<7-char git SHA>` — immutable, for traceability
+   - `<env>-latest` — env-scoped mutable pointer
+   - `latest` — keeps the Terraform fallback tag resolvable
+2. Registers a new ECS task definition revision pointing to the SHA-tagged image
+3. Updates the ECS service to use the new revision
+
+> Infrastructure changes (cluster, VPC, IAM, SSM parameters, …) are managed
+> separately by manually running `terraform apply` — the deploy workflow only
+> updates the running container image.
 
 ---
 
