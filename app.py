@@ -178,9 +178,22 @@ if auth_configured() and not st.session_state.authenticated:
 # Sidebar
 # ---------------------------------------------------------------------------
 
+def _git_version() -> str:
+    """Return the current git tag or short commit hash, e.g. 'v1.2.3' or 'a1b2c3d'."""
+    import subprocess
+    try:
+        return subprocess.check_output(
+            ["git", "describe", "--tags", "--always"],
+            stderr=subprocess.DEVNULL,
+            cwd=os.path.dirname(__file__) or ".",
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
 with st.sidebar:
     st.title("🐦 eBird Assistant")
-    st.caption("Powered by LangChain · HuggingFace · eBird API v2")
+    st.caption(f"Powered by LangChain · HuggingFace · eBird API v2 · `{_git_version()}`")
 
     # --- Authenticated user info & sign-out ---
     if st.session_state.authenticated:
@@ -238,9 +251,13 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.checkbox("🪵 Show log pane", key="show_logs")
+    _is_dev = os.environ.get("APP_ENV", "dev") != "prod"
+    if _is_dev:
+        st.checkbox("🪵 Show log pane", key="show_logs")
+    else:
+        st.session_state["show_logs"] = False
 
-    if st.session_state.get("show_logs", False):
+    if _is_dev and st.session_state.get("show_logs", False):
         _LEVEL_OPTIONS = ["DEBUG", "INFO", "WARNING", "ERROR"]
 
         selected_level = st.selectbox(

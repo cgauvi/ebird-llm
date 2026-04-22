@@ -67,6 +67,19 @@ resource "aws_ecs_cluster" "main" {
   name = local.prefix
 }
 
+# Associate both FARGATE and FARGATE_SPOT with the cluster so the service can
+# switch between them without recreating the cluster.
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+
+  default_capacity_provider_strategy {
+    capacity_provider = var.enable_spot ? "FARGATE_SPOT" : "FARGATE"
+    weight            = 1
+    base              = 1
+  }
+}
+
 # ---------------------------------------------------------------------------
 # ECS Task Definition
 # ---------------------------------------------------------------------------
@@ -104,6 +117,7 @@ resource "aws_ecs_task_definition" "app" {
         { name = "COGNITO_CLIENT_ID",      value = aws_cognito_user_pool_client.streamlit.id },
         { name = "DYNAMODB_TABLE_PREFIX",  value = local.prefix },
         { name = "AWS_REGION",             value = var.aws_region },
+        { name = "APP_ENV",                value = var.environment },
       ]
 
       logConfiguration = {
@@ -134,8 +148,27 @@ resource "aws_ecs_service" "app" {
   name            = local.prefix
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.app.arn
-  launch_type     = "FARGATE"
   desired_count   = var.desired_count
+
+  # Use capacity_provider_strategy instead of launch_type so we can mix
+  # FARGATE_SPOT (cheap, interruptible) with on-demand FARGATE (fallback).
+  # NOTE: switching an existing service from launch_type to
+  # capacity_provider_strategy requires a service replacement:
+  #   terraform apply -replace=aws_ecs_service.app
+  dynamic "capacity_provider_strategy" {
+    # Spot enabled: prefer FARGATE_SPOT (weight 3) with FARGATE fallback (weight 1).
+    # Spot disabled: use plain FARGATE only.
+    for_each = var.enable_spot ? [
+      { provider = "FARGATE_SPOT", weight = 3, base = 1 },
+      { provider = "FARGATE", weight = 1, base = 0 },
+    ] : [{ provider = "FARGATE", weight = 1, base = 1 }]
+
+    content {
+      capacity_provider = capacity_provider_strategy.value.provider
+      weight            = capacity_provider_strategy.value.weight
+      base              = capacity_provider_strategy.value.base
+    }
+  }
 
   network_configuration {
     subnets         = aws_subnet.public[*].id
@@ -151,4 +184,49 @@ resource "aws_ecs_service" "app" {
   }
 
   depends_on = [aws_lb_listener.http]
+}
+
+# ---------------------------------------------------------------------------
+# Scheduled scale-to-zero (off-hours cost saving)
+# ---------------------------------------------------------------------------
+# Set enable_scheduled_scaling = true in tfvars to activate.
+# Cron expressions are in UTC; adjust scale_down_cron / scale_up_cron as needed.
+
+resource "aws_appautoscaling_target" "ecs" {
+  count              = var.enable_scheduled_scaling ? 1 : 0
+  service_namespace  = "ecs"
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.app.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  min_capacity       = 0
+  max_capacity       = max(var.desired_count, 1)
+}
+
+# Scale down to zero tasks (off-hours).
+resource "aws_appautoscaling_scheduled_action" "scale_down" {
+  count              = var.enable_scheduled_scaling ? 1 : 0
+  name               = "${local.prefix}-scale-down"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.ecs[0].resource_id
+  scalable_dimension = "ecs:service:DesiredCount"
+  schedule           = var.scale_down_cron
+
+  scalable_target_action {
+    min_capacity = 0
+    max_capacity = 0
+  }
+}
+
+# Scale back up at the start of business.
+resource "aws_appautoscaling_scheduled_action" "scale_up" {
+  count              = var.enable_scheduled_scaling ? 1 : 0
+  name               = "${local.prefix}-scale-up"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.ecs[0].resource_id
+  scalable_dimension = "ecs:service:DesiredCount"
+  schedule           = var.scale_up_cron
+
+  scalable_target_action {
+    min_capacity = 1
+    max_capacity = max(var.desired_count, 1)
+  }
 }

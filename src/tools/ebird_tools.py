@@ -61,7 +61,6 @@ def _return_obs(records: list, note: str | None = None) -> str:
     if note:
         parts.append(note)
     parts.append(f"Retrieved {n} observations.")
-    parts.append(f"JSON file: {obs_file}")
 
     if not df.empty:
         parts.append(f"Fields: {', '.join(df.columns)}.")
@@ -82,9 +81,8 @@ def _return_obs(records: list, note: str | None = None) -> str:
             )
 
     parts.append(
-        f'Call show_observations_table to display the data as a table, '
-        f'create_sightings_map or create_historical_chart with '
-        f'observations_file="{obs_file}" to visualize.'
+        'Call show_observations_table to display the data as a table, '
+        'or create_sightings_map or create_historical_chart to visualize.'
     )
     return " ".join(parts)
 

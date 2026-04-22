@@ -1,6 +1,6 @@
 output "app_url" {
   description = "Public URL of the Streamlit app"
-  value       = "http://${aws_lb.app.dns_name}"
+  value       = "https://${aws_lb.app.dns_name}"
 }
 
 output "ecr_repository_url" {
