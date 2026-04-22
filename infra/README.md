@@ -226,15 +226,19 @@ Populate them before starting the ECS service.
 
 **Dev:**
 
+Assuming local env var EBIRD_API_KEY and HUGGINGFACE_API_TOKEN contains the key values
+
 ```bash
 aws ssm put-parameter \
   --name "/ebird-llm-dev/EBIRD_API_KEY" \
-  --value "<YOUR_EBIRD_API_KEY>" \
+  --value $EBIRD_API_KEY  \
   --type SecureString --overwrite --region us-east-2
+
+
 
 aws ssm put-parameter \
   --name "/ebird-llm-dev/HUGGINGFACE_API_TOKEN" \
-  --value "<YOUR_HUGGINGFACE_API_TOKEN>" \
+  --value $HUGGINGFACE_API_TOKEN \
   --type SecureString --overwrite --region us-east-2
 ```
 
@@ -243,12 +247,12 @@ aws ssm put-parameter \
 ```bash
 aws ssm put-parameter \
   --name "/ebird-llm-prod/EBIRD_API_KEY" \
-  --value "<YOUR_EBIRD_API_KEY>" \
+  --value $EBIRD_API_KEY \
   --type SecureString --overwrite --region us-east-2
 
 aws ssm put-parameter \
   --name "/ebird-llm-prod/HUGGINGFACE_API_TOKEN" \
-  --value "<YOUR_HUGGINGFACE_API_TOKEN>" \
+  --value $HUGGINGFACE_API_TOKEN \
   --type SecureString --overwrite --region us-east-2
 ```
 

@@ -233,7 +233,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~1.5"
-          terraform_wrapper: false   # ← add this
+          terraform_wrapper: false   # ← add this to disable hashicorp/terraform-github-actions which does not support apply with a saved plan file
 
       - name: Download plan artifact
         uses: actions/download-artifact@v4
