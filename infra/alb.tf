@@ -21,6 +21,8 @@ resource "aws_lb_target_group" "app" {
   vpc_id      = aws_vpc.main.id
   target_type = "ip" # required for Fargate (awsvpc network mode)
 
+  deregistration_delay = 30
+
   health_check {
     path                = "/_stcore/health"
     protocol            = "HTTP"
