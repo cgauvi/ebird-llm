@@ -66,6 +66,30 @@ variable "vpc_cidr" {
   default     = "10.0.0.0/16"
 }
 
+variable "enable_spot" {
+  description = "If true, prefer FARGATE_SPOT (with FARGATE fallback) for ECS tasks. Cheaper but interruptible."
+  type        = bool
+  default     = true
+}
+
+variable "enable_scheduled_scaling" {
+  description = "If true, create Application Auto Scaling scheduled actions to scale the ECS service down/up off-hours."
+  type        = bool
+  default     = true
+}
+
+variable "scale_down_cron" {
+  description = "Cron expression (UTC) for scaling the ECS service to zero tasks. Default is 22:00 America/Montreal in EDT (02:00 UTC); will drift +1h in EST (winter). Only used when enable_scheduled_scaling is true."
+  type        = string
+  default     = "cron(0 2 * * ? *)"
+}
+
+variable "scale_up_cron" {
+  description = "Cron expression (UTC) for scaling the ECS service back up. Default is 08:00 America/Montreal in EDT (12:00 UTC); will drift +1h in EST (winter). Only used when enable_scheduled_scaling is true."
+  type        = string
+  default     = "cron(0 12 * * ? *)"
+}
+
 # ---------------------------------------------------------------------------
 # TLS / HTTPS
 # ---------------------------------------------------------------------------
