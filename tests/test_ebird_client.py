@@ -183,3 +183,110 @@ class TestEBirdClientGet:
         assert result == regions
         url = m.call_args[0][0]
         assert "subnational1/US" in url
+
+
+# ---------------------------------------------------------------------------
+# Curl logging
+# ---------------------------------------------------------------------------
+
+
+class TestCurlLogging:
+    """_get() must emit a redacted curl command via logger.info for every live request."""
+
+    @pytest.fixture
+    def client(self, monkeypatch):
+        monkeypatch.setenv("EBIRD_API_KEY", "testkey")
+        return EBirdClient()
+
+    def _resp(self, json_data, url: str):
+        """Fake response whose .request.url mimics a real PreparedRequest."""
+        mock = MagicMock()
+        mock.ok = True
+        mock.json.return_value = json_data
+        mock.text = "non-empty"
+        mock.request.url = url
+        return mock
+
+    def _assert_curl(self, mock_logger, expected_url: str):
+        """Assert a single INFO call containing a redacted curl for *expected_url*."""
+        mock_logger.info.assert_called_once()
+        fmt, url_arg = mock_logger.info.call_args[0]
+        full_msg = fmt % url_arg
+        assert "curl" in full_msg
+        assert "x-ebirdapitoken" in full_msg
+        assert "<REDACTED>" in full_msg
+        assert expected_url in full_msg
+
+    # ------------------------------------------------------------------
+
+    def test_recent_obs_by_location(self, client):
+        url = "https://api.ebird.org/v2/data/obs/geo/recent?lat=48.85&lng=2.35&dist=10&back=3"
+        with patch.object(client._session, "get", return_value=self._resp([{}], url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.recent_observations_by_location(48.85, 2.35, dist=10, back=3)
+        self._assert_curl(mock_logger, url)
+
+    def test_recent_obs_by_location_with_species(self, client):
+        url = "https://api.ebird.org/v2/data/obs/geo/recent/norcar?lat=40.71&lng=-74.01&dist=25&back=7"
+        with patch.object(client._session, "get", return_value=self._resp([{}], url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.recent_observations_by_location(40.71, -74.01, species_code="norcar")
+        self._assert_curl(mock_logger, url)
+
+    def test_recent_obs_by_region(self, client):
+        url = "https://api.ebird.org/v2/data/obs/US-NY/recent?back=7"
+        with patch.object(client._session, "get", return_value=self._resp([{}], url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.recent_observations_by_region("US-NY", back=7)
+        self._assert_curl(mock_logger, url)
+
+    def test_recent_obs_by_region_with_species(self, client):
+        url = "https://api.ebird.org/v2/data/obs/US-NY/recent/norcar?back=7"
+        with patch.object(client._session, "get", return_value=self._resp([{}], url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.recent_observations_by_region("US-NY", back=7, species_code="norcar")
+        self._assert_curl(mock_logger, url)
+
+    def test_historic_observations(self, client):
+        url = "https://api.ebird.org/v2/data/obs/CA-ON/historic/2024/05/01"
+        with patch.object(client._session, "get", return_value=self._resp([{}], url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.historic_observations("CA-ON", year=2024, month=5, day=1)
+        self._assert_curl(mock_logger, url)
+
+    def test_notable_obs_by_location(self, client):
+        url = "https://api.ebird.org/v2/data/obs/geo/recent/notable?lat=51.5&lng=-0.12&dist=10&back=7"
+        with patch.object(client._session, "get", return_value=self._resp([{}], url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.notable_observations_by_location(51.5, -0.12, dist=10, back=7)
+        self._assert_curl(mock_logger, url)
+
+    def test_nearby_hotspots(self, client):
+        url = "https://api.ebird.org/v2/ref/hotspot/geo?lat=40.78&lng=-73.97&dist=25"
+        with patch.object(client._session, "get", return_value=self._resp([{}], url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.nearby_hotspots(40.78, -73.97, dist=25)
+        self._assert_curl(mock_logger, url)
+
+    def test_region_list(self, client):
+        url = "https://api.ebird.org/v2/ref/region/list/subnational1/US"
+        with patch.object(client._session, "get", return_value=self._resp([{}], url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.region_list("US", "subnational1")
+        self._assert_curl(mock_logger, url)
+
+    def test_region_info(self, client):
+        url = "https://api.ebird.org/v2/ref/region/info/US-NY"
+        with patch.object(client._session, "get", return_value=self._resp({}, url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.region_info("US-NY")
+        self._assert_curl(mock_logger, url)
+
+    def test_no_curl_on_cache_hit(self, client):
+        """Second identical request must use the cache — no HTTP call, no curl log."""
+        url = "https://api.ebird.org/v2/data/obs/geo/recent?lat=48.85&lng=2.35&dist=25&back=7"
+        with patch.object(client._session, "get", return_value=self._resp([{}], url)), \
+             patch("src.utils.ebird_client.logger") as mock_logger:
+            client.recent_observations_by_location(48.85, 2.35)
+            client.recent_observations_by_location(48.85, 2.35)  # cache hit
+        assert mock_logger.info.call_count == 1

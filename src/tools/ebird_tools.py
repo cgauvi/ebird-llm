@@ -11,6 +11,7 @@ Each tool:
 import datetime
 import difflib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Optional
@@ -21,7 +22,13 @@ from langchain_core.tools import ToolException
 
 from src.utils.ebird_client import EBirdClient, EBirdError
 from src.utils.region_cache import register_codes, validate_region_code
-from src.utils.state import set_last_observations, set_last_obs_file, set_obs_dataframe, set_known_species
+from src.utils.state import (
+    set_last_observations,
+    set_last_obs_file,
+    set_obs_dataframe,
+    set_known_species,
+    set_last_search_params,
+)
 from src.utils.summarizer import SUMMARIES_DIR
 
 
@@ -79,6 +86,21 @@ def _return_obs(records: list, note: str | None = None) -> str:
             parts.append(
                 "Top species: " + ", ".join(f"{sp} ({int(c)})" for sp, c in top.items()) + "."
             )
+
+        if "obsDt" in df.columns:
+            dates = pd.to_datetime(df["obsDt"], errors="coerce").dropna()
+            if not dates.empty:
+                newest = dates.max().date()
+                oldest = dates.min().date()
+                parts.append(f"Observation date range: {oldest} to {newest}.")
+                days_old = (datetime.date.today() - newest).days
+                if days_old > 30:
+                    parts.append(
+                        f"⚠️ STALE DATA WARNING: The most recent observation is {days_old} days old "
+                        f"(newest date: {newest}). "
+                        "You MUST explicitly tell the user that these records are unexpectedly old "
+                        "and may not reflect current conditions. Do not present them as 'recent'."
+                    )
 
     parts.append(
         'Call show_observations_table to display the data as a table, '
@@ -279,6 +301,14 @@ def get_recent_observations_by_location(
             f"days_back={days_back}"
             + (f", species_code={species_code}" if species_code else ""),
         )
+        set_last_search_params({
+            "query_type": "location",
+            "lat": lat,
+            "lng": lng,
+            "dist_km": dist_km,
+            "days_back": days_back,
+            "species_code": species_code,
+        })
         return _return_obs(records)
     except EBirdError as exc:
         raise ToolException(str(exc)) from exc
@@ -336,6 +366,12 @@ def get_recent_observations_by_region(
             f"recent observations in region={code}, days_back={days_back}"
             + (f", species_code={species_code}" if species_code else ""),
         )
+        set_last_search_params({
+            "query_type": "region",
+            "region_code": code,
+            "days_back": days_back,
+            "species_code": species_code,
+        })
         return _return_obs(records, note=correction_note if correction_note else None)
     except EBirdError as exc:
         raise ToolException(str(exc)) from exc
@@ -395,6 +431,13 @@ def get_historic_observations(
             records,
             f"historic observations in region={code} on {year}-{month:02d}-{day:02d}",
         )
+        set_last_search_params({
+            "query_type": "historic",
+            "region_code": code,
+            "year": year,
+            "month": month,
+            "day": day,
+        })
         return _return_obs(records, note=correction_note if correction_note else None)
     except EBirdError as exc:
         raise ToolException(str(exc)) from exc
@@ -407,30 +450,41 @@ def get_historic_observations(
 
 @tool
 def get_nearby_hotspots(
-    lat: float,
-    lng: float,
+    lat: float = None,
+    lng: float = None,
     dist_km: int = 25,
+    region_code: str = None,
 ) -> str:
-    """Return eBird birding hotspots within a given radius of a coordinate.
+    """Return eBird birding hotspots by region or within a given radius of a coordinate.
 
     Args:
         lat: Latitude of the center point (decimal degrees).
         lng: Longitude of the center point (decimal degrees).
         dist_km: Search radius in kilometres (1–50, default 25).
+        region_code: eBird region code (e.g. 'MX-DF', 'US-NY').
 
     Returns:
         JSON array of hotspot records. Key fields: locId, locName,
         lat, lng, latestObsDt, numSpeciesAllTime.
     """
-    err = _validate_lat_lng(lat, lng)
-    if err:
-        raise ToolException(err)
-    try:
-        records = _get_client().nearby_hotspots(lat=lat, lng=lng, dist=dist_km)
-        _require_results(records, f"nearby hotspots near lat={lat}, lng={lng}, dist_km={dist_km}")
-        return json.dumps(records)
-    except EBirdError as exc:
-        raise ToolException(str(exc)) from exc
+    if region_code:
+        try:
+            records = _get_client().nearby_hotspots(region_code=region_code)
+            _require_results(records, f"hotspots for region_code={region_code}")
+            return json.dumps(records)
+        except EBirdError as exc:
+            raise ToolException(str(exc)) from exc
+    if lat is not None and lng is not None:
+        err = _validate_lat_lng(lat, lng)
+        if err:
+            raise ToolException(err)
+        try:
+            records = _get_client().nearby_hotspots(lat=lat, lng=lng, dist=dist_km)
+            _require_results(records, f"nearby hotspots near lat={lat}, lng={lng}, dist_km={dist_km}")
+            return json.dumps(records)
+        except EBirdError as exc:
+            raise ToolException(str(exc)) from exc
+    raise ToolException("Must provide either region_code or lat/lng for hotspot lookup.")
 
 
 # ---------------------------------------------------------------------------
@@ -522,13 +576,120 @@ def get_notable_observations_by_location(
             records,
             f"notable observations near lat={lat}, lng={lng}, dist_km={dist_km}, days_back={days_back}",
         )
+        set_last_search_params({
+            "query_type": "notable",
+            "lat": lat,
+            "lng": lng,
+            "dist_km": dist_km,
+            "days_back": days_back,
+        })
         return _return_obs(records)
     except EBirdError as exc:
         raise ToolException(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
-# Tool 7 — Region info (bounding box + metadata)
+# Tool 7 — Validate a point against a region's bounding box (1 km buffer)
+# ---------------------------------------------------------------------------
+
+# 1 degree latitude ≈ 111.32 km.
+_KM_PER_LAT_DEG = 111.32
+
+
+@tool
+def validate_point_in_region(
+    region_code: str,
+    lat: float,
+    lng: float,
+) -> str:
+    """Check whether a lat/lng point falls within an eBird region (with a 1 km buffer).
+
+    Fetches the region's bounding box from the eBird API and tests whether the
+    supplied coordinate lies inside that box after expanding each edge by ~1 km.
+    Call this before presenting any specific coordinate to the user to confirm it
+    genuinely belongs to the region you are describing — never fabricate or guess
+    coordinates.
+
+    Args:
+        region_code: eBird region code (e.g. 'US-NY', 'CA-ON', 'FR-75').
+        lat: Latitude of the point to check (decimal degrees).
+        lng: Longitude of the point to check (decimal degrees).
+
+    Returns:
+        JSON object with fields:
+          inside (bool)       — True when the point is within the buffered bbox.
+          region_code (str)   — the (possibly auto-corrected) region code used.
+          region_name (str)   — human-readable region name from the API.
+          bounds (dict)       — original bbox: minX, maxX, minY, maxY.
+          buffer_deg (dict)   — buffer applied in degrees: lat_deg, lng_deg.
+          message (str)       — human-readable verdict.
+    """
+    code = region_code.strip().upper()
+    err = validate_region_code(code)
+    if err:
+        correction = _autocorrect_subregion(code)
+        if correction:
+            code, _ = correction
+        else:
+            raise ToolException(err)
+
+    err = _validate_lat_lng(lat, lng)
+    if err:
+        raise ToolException(err)
+
+    try:
+        info = _get_client().region_info(code)
+    except EBirdError as exc:
+        raise ToolException(str(exc)) from exc
+
+    bounds = info.get("bounds")
+    if not bounds:
+        raise ToolException(
+            f"region_info for '{code}' did not return bounding-box data. "
+            "The region may not support spatial queries."
+        )
+
+    min_x = float(bounds["minX"])  # west longitude
+    max_x = float(bounds["maxX"])  # east longitude
+    min_y = float(bounds["minY"])  # south latitude
+    max_y = float(bounds["maxY"])  # north latitude
+
+    # ~1 km buffer in degrees
+    lat_buf = 1.0 / _KM_PER_LAT_DEG
+    cos_lat = math.cos(math.radians(abs(lat)))
+    lng_buf = lat_buf / max(cos_lat, 1e-6)
+
+    inside = (
+        (min_y - lat_buf) <= lat <= (max_y + lat_buf)
+        and (min_x - lng_buf) <= lng <= (max_x + lng_buf)
+    )
+
+    region_name = info.get("result", code)
+    verdict = "inside" if inside else "OUTSIDE"
+    qualifier = " (within 1 km buffer)" if inside else " even with a 1 km buffer"
+    message = (
+        f"Point ({lat}, {lng}) is {verdict} the {region_name} ({code}) "
+        f"bounding box{qualifier}."
+    )
+
+    return json.dumps(
+        {
+            "inside": inside,
+            "region_code": code,
+            "region_name": region_name,
+            "bounds": {"minX": min_x, "maxX": max_x, "minY": min_y, "maxY": max_y},
+            "buffer_deg": {
+                "lat_deg": round(lat_buf, 6),
+                "lng_deg": round(lng_buf, 6),
+            },
+            "message": message,
+        },
+        ensure_ascii=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool 8 — Region info (bounding box + metadata)
 # ---------------------------------------------------------------------------
 
 
@@ -866,6 +1027,177 @@ def validate_species(
 
 
 # ---------------------------------------------------------------------------
+# Tool 12 — Multi-species recent observations in a named region
+# ---------------------------------------------------------------------------
+
+
+@tool
+def get_recent_observations_by_region_multi_species(
+    region_code: str,
+    species_names: list[str],
+    days_back: int = 30,
+) -> str:
+    """Fetch and combine recent observations for multiple species in a region.
+
+    Use this when the user wants to *compare* two or more species in the same
+    region (e.g. "compare Tree Swallow and Savannah Sparrow in Mont Tremblant").
+    The tool resolves each species name or code via taxonomy lookup, calls the
+    eBird API once per species, and returns a single combined dataset so that
+    create_historical_chart or create_sightings_map can show all species together.
+
+    Args:
+        region_code: eBird region code (e.g. 'CA-QC', 'US-NY', 'CA-QC-LAU').
+            Call get_region_list first if you are not certain of the exact code.
+        species_names: List of common names, scientific names, or eBird species
+            codes to fetch (e.g. ['Tree Swallow', 'Savannah Sparrow']).
+        days_back: How many days back to search (1–30, default 30).
+
+    Returns:
+        Combined observation records for all requested species.  The compact
+        summary includes the file path — pass it to create_historical_chart or
+        create_sightings_map for a multi-species visualisation.
+    """
+    code = region_code.strip().upper()
+    correction_note: str | None = None
+    err = validate_region_code(code)
+    if err:
+        correction = _autocorrect_subregion(code)
+        if correction:
+            corrected_code, corrected_name = correction
+            correction_note = (
+                f"'{code}' was not recognised; automatically used "
+                f"'{corrected_code}' ({corrected_name}) as the closest match."
+            )
+            code = corrected_code
+        else:
+            raise ToolException(err)
+
+    if not species_names:
+        raise ToolException("species_names must contain at least one species.")
+
+    # Resolve each species name/code → eBird species code
+    resolved: list[tuple[str, str]] = []  # (species_code, display_name)
+    failed: list[str] = []
+    for query in species_names:
+        q = query.strip().lower()
+        # Fast path: looks like a valid species code already
+        if _SPECIES_CODE_RE.match(q):
+            resolved.append((q, query))
+            continue
+        try:
+            tax_records = _get_client().taxonomy_search(q)
+        except EBirdError as exc:
+            failed.append(f"'{query}' (taxonomy lookup failed: {exc})")
+            continue
+        if not tax_records:
+            failed.append(f"'{query}' (not found in eBird taxonomy)")
+            continue
+        # Pick the best match
+        best_score = 0.0
+        best_rec: dict = {}
+        for r in tax_records:
+            score = max(
+                difflib.SequenceMatcher(None, q, r.get("speciesCode", "").lower()).ratio(),
+                difflib.SequenceMatcher(None, q, r.get("comName", "").lower()).ratio(),
+                difflib.SequenceMatcher(None, q, r.get("sciName", "").lower()).ratio(),
+            )
+            if score > best_score:
+                best_score, best_rec = score, r
+        if best_score >= 0.4 and best_rec.get("speciesCode"):
+            resolved.append((best_rec["speciesCode"], best_rec.get("comName", query)))
+        else:
+            failed.append(f"'{query}' (no close match; best score {best_score:.2f})")
+
+    if not resolved:
+        raise ToolException(
+            "Could not resolve any of the requested species: "
+            + "; ".join(failed)
+        )
+
+    # Fetch observations for each resolved species
+    all_records: list[dict] = []
+    fetch_errors: list[str] = []
+    for sp_code, display_name in resolved:
+        err_v = _validate_species_code(sp_code)
+        if err_v:
+            fetch_errors.append(f"{display_name}: {err_v}")
+            continue
+        try:
+            records = _get_client().recent_observations_by_region(
+                region_code=code,
+                back=days_back,
+                species_code=sp_code,
+            )
+            all_records.extend(records)
+        except EBirdError as exc:
+            fetch_errors.append(f"{display_name} ({sp_code}): {exc}")
+
+    if not all_records:
+        detail = "; ".join(fetch_errors) if fetch_errors else "no records returned"
+        raise ToolException(
+            f"No observations found for any species in region={code} "
+            f"over the past {days_back} days. Details: {detail}"
+        )
+
+    notes: list[str] = []
+    if correction_note:
+        notes.append(correction_note)
+    if failed:
+        notes.append("Could not resolve: " + "; ".join(failed))
+    if fetch_errors:
+        notes.append("Fetch errors: " + "; ".join(fetch_errors))
+    species_fetched = ", ".join(name for _, name in resolved)
+    notes.append(f"Fetched data for: {species_fetched}.")
+
+    set_last_search_params({
+        "query_type": "region_multi_species",
+        "region_code": code,
+        "days_back": days_back,
+        "species_names": species_names,
+    })
+    return _return_obs(all_records, note=" ".join(notes) if notes else None)
+
+
+# ---------------------------------------------------------------------------
+# Tool 13 — Session context (last search params + known species)
+# ---------------------------------------------------------------------------
+
+
+@tool
+def get_session_context() -> str:
+    """Return what the current session remembers from previous queries.
+
+    Call this when the user refers to a previous region, date, or species
+    ambiguously — e.g. "same region as before", "that date", "those birds",
+    "same place" — to retrieve cached values and confirm with the user before
+    proceeding.
+
+    Returns:
+        JSON object with:
+          last_search_params — region/date/coordinates/species from the last
+            observation query (null if no query has been made yet).
+          known_species — list of species observed in the last result set
+            (speciesCode, comName, sciName), up to the first 10.
+          last_observations_file — path to the JSON file from the last query
+            (null if none).
+    """
+    from src.utils.state import get_last_search_params, get_known_species, get_last_obs_file
+
+    params = get_last_search_params()
+    known = get_known_species()
+    last_file = get_last_obs_file()
+
+    return json.dumps(
+        {
+            "last_search_params": params,
+            "known_species": known[:10] if known else [],
+            "last_observations_file": last_file,
+        },
+        ensure_ascii=False,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public list used by agent.py
 # ---------------------------------------------------------------------------
 
@@ -876,9 +1208,12 @@ EBIRD_TOOLS = [
     get_nearby_hotspots,
     get_region_list,
     get_notable_observations_by_location,
+    validate_point_in_region,
     get_region_info,
     get_top100_contributors,
     get_species_list,
     get_region_stats,
     validate_species,
+    get_recent_observations_by_region_multi_species,
+    get_session_context,
 ]

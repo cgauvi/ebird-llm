@@ -119,3 +119,22 @@ def set_known_species(records: list[dict]) -> None:
                 "sciName": r.get("sciName", ""),
             })
     _known_species = species
+
+
+# ---------------------------------------------------------------------------
+# Last-search-params cache — stores the parameters used in the most recent
+# eBird observation query so the agent can suggest them when the user is vague.
+# ---------------------------------------------------------------------------
+
+_last_search_params: "dict | None" = None
+
+
+def get_last_search_params() -> "dict | None":
+    """Return the parameters used in the most recent eBird observation query."""
+    return _last_search_params
+
+
+def set_last_search_params(params: dict) -> None:
+    """Persist the parameters (region, date, coordinates, species, days_back) from the last query."""
+    global _last_search_params
+    _last_search_params = params

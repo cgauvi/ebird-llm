@@ -15,6 +15,7 @@ from src.tools.ebird_tools import (
     get_recent_observations_by_location,
     get_recent_observations_by_region,
     get_region_list,
+    validate_point_in_region,
 )
 from src.utils.ebird_client import EBirdError
 
@@ -200,6 +201,21 @@ class TestGetNearbyHotspots:
         mock_client.nearby_hotspots.side_effect = EBirdError("error")
         with pytest.raises(ToolException):
             get_nearby_hotspots.invoke({"lat": 40.71, "lng": -74.01})
+
+    def test_region_code_priority(self, mock_client):
+        mock_client.nearby_hotspots.return_value = SAMPLE_HOTSPOTS
+        result = get_nearby_hotspots.invoke({"region_code": "US-NY"})
+        assert json.loads(result) == SAMPLE_HOTSPOTS
+        mock_client.nearby_hotspots.assert_called_once_with(region_code="US-NY")
+
+    def test_region_code_and_lat_lng_prefers_region(self, mock_client):
+        mock_client.nearby_hotspots.return_value = SAMPLE_HOTSPOTS
+        get_nearby_hotspots.invoke({"region_code": "US-NY", "lat": 40.71, "lng": -74.01})
+        mock_client.nearby_hotspots.assert_called_once_with(region_code="US-NY")
+
+    def test_missing_all_params_raises(self, mock_client):
+        with pytest.raises(ToolException):
+            get_nearby_hotspots.invoke({})
 
 
 # ---------------------------------------------------------------------------
@@ -406,3 +422,96 @@ class TestAutocorrectInHistoricObs:
         mock_client.historic_observations.assert_called_once_with(
             region_code="CA-QC-LAU", year=2024, month=5, day=1
         )
+
+
+# ---------------------------------------------------------------------------
+# validate_point_in_region
+# ---------------------------------------------------------------------------
+
+# Bounding box for New York state (approximate).
+_NY_BOUNDS = {"minX": -79.76, "maxX": -71.86, "minY": 40.50, "maxY": 45.02}
+_NY_INFO = {"result": "New York", "bounds": _NY_BOUNDS}
+
+
+class TestValidatePointInRegion:
+    def test_point_inside_region(self, mock_client):
+        mock_client.region_info.return_value = _NY_INFO
+        result = json.loads(
+            validate_point_in_region.invoke(
+                {"region_code": "US-NY", "lat": 42.65, "lng": -73.75}
+            )
+        )
+        assert result["inside"] is True
+        assert result["region_code"] == "US-NY"
+        assert result["region_name"] == "New York"
+        assert "inside" in result["message"]
+
+    def test_point_outside_region(self, mock_client):
+        mock_client.region_info.return_value = _NY_INFO
+        # Los Angeles is far outside New York.
+        result = json.loads(
+            validate_point_in_region.invoke(
+                {"region_code": "US-NY", "lat": 34.05, "lng": -118.25}
+            )
+        )
+        assert result["inside"] is False
+        assert "OUTSIDE" in result["message"]
+
+    def test_point_on_boundary_within_buffer(self, mock_client):
+        mock_client.region_info.return_value = _NY_INFO
+        # Just beyond the southern edge (40.50) but within ~1 km (~0.009°).
+        result = json.loads(
+            validate_point_in_region.invoke(
+                {"region_code": "US-NY", "lat": 40.4915, "lng": -74.0}
+            )
+        )
+        assert result["inside"] is True
+
+    def test_point_outside_beyond_buffer(self, mock_client):
+        mock_client.region_info.return_value = _NY_INFO
+        # 0.1° south of the southern edge — outside even the 1 km buffer.
+        result = json.loads(
+            validate_point_in_region.invoke(
+                {"region_code": "US-NY", "lat": 40.40, "lng": -74.0}
+            )
+        )
+        assert result["inside"] is False
+
+    def test_invalid_lat_raises(self, mock_client):
+        with pytest.raises(ToolException, match="out of range"):
+            validate_point_in_region.invoke(
+                {"region_code": "US-NY", "lat": 200.0, "lng": -73.75}
+            )
+
+    def test_invalid_region_code_raises(self, mock_client):
+        with pytest.raises(ToolException):
+            validate_point_in_region.invoke(
+                {"region_code": "ZZ-INVALID", "lat": 42.65, "lng": -73.75}
+            )
+
+    def test_missing_bounds_raises(self, mock_client):
+        mock_client.region_info.return_value = {"result": "No Bounds Region"}
+        with pytest.raises(ToolException, match="bounding-box"):
+            validate_point_in_region.invoke(
+                {"region_code": "US-NY", "lat": 42.65, "lng": -73.75}
+            )
+
+    def test_api_error_raises(self, mock_client):
+        from src.utils.ebird_client import EBirdError
+        mock_client.region_info.side_effect = EBirdError("500 server error")
+        with pytest.raises(ToolException, match="500 server error"):
+            validate_point_in_region.invoke(
+                {"region_code": "US-NY", "lat": 42.65, "lng": -73.75}
+            )
+
+    def test_buffer_deg_present_in_output(self, mock_client):
+        mock_client.region_info.return_value = _NY_INFO
+        result = json.loads(
+            validate_point_in_region.invoke(
+                {"region_code": "US-NY", "lat": 42.65, "lng": -73.75}
+            )
+        )
+        assert "lat_deg" in result["buffer_deg"]
+        assert "lng_deg" in result["buffer_deg"]
+        # lat buffer should be approximately 1/111.32 ≈ 0.009°
+        assert abs(result["buffer_deg"]["lat_deg"] - 0.008983) < 0.0001

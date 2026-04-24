@@ -48,6 +48,8 @@ jobs:
           fi
           # Use the short SHA as the image tag for traceability
           echo "IMAGE_TAG=$(echo '${{ github.event.workflow_run.head_sha }}' | cut -c1-7)" >> "$GITHUB_ENV"
+          # Human-readable version: tag if present (e.g. v1.2.3), otherwise tag+distance+sha
+          echo "BUILD_VERSION=$(git describe --tags --always)" >> "$GITHUB_ENV"
 
       # ── AWS authentication (OIDC — no long-lived credentials stored) ───────
       - name: Configure AWS credentials
@@ -71,6 +73,7 @@ jobs:
           file: Dockerfile
           target: runtime
           push: true
+          build-args: BUILD_VERSION=${{ env.BUILD_VERSION }}
           # Three tags per push:
           #   <sha>       — immutable, for traceability
           #   <env>-latest — env-scoped mutable pointer

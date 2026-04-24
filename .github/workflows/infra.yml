@@ -46,20 +46,12 @@ jobs:
           if [[ "$BRANCH" == "master" || "$BRANCH" == "main" ]]; then
             echo "TF_ENV=prod"                   >> "$GITHUB_ENV"
             echo "BACKEND_FILE=backend-prod.hcl" >> "$GITHUB_ENV"
-            echo "TFVARS_FILE=prod.tfvars"        >> "$GITHUB_ENV"
-            echo "VPC_CIDR=10.1.0.0/16"          >> "$GITHUB_ENV"
-            echo "TASK_CPU=1024"                 >> "$GITHUB_ENV"
-            echo "TASK_MEMORY=2048"              >> "$GITHUB_ENV"
-            echo "DESIRED_COUNT=1"               >> "$GITHUB_ENV"
+            echo "TFVARS_FILE=prod.tfvars"       >> "$GITHUB_ENV"
             echo "tf_env=prod"                   >> "$GITHUB_OUTPUT"
           else
             echo "TF_ENV=dev"                    >> "$GITHUB_ENV"
             echo "BACKEND_FILE=backend-dev.hcl"  >> "$GITHUB_ENV"
-            echo "TFVARS_FILE=dev.tfvars"         >> "$GITHUB_ENV"
-            echo "VPC_CIDR=10.0.0.0/16"          >> "$GITHUB_ENV"
-            echo "TASK_CPU=512"                  >> "$GITHUB_ENV"
-            echo "TASK_MEMORY=1024"              >> "$GITHUB_ENV"
-            echo "DESIRED_COUNT=1"               >> "$GITHUB_ENV"
+            echo "TFVARS_FILE=dev.tfvars"        >> "$GITHUB_ENV"
             echo "tf_env=dev"                    >> "$GITHUB_OUTPUT"
           fi
 
@@ -84,19 +76,6 @@ jobs:
             | awk -F: '{print $NF}') || true
           echo "IMAGE_TAG=${IMAGE_TAG:-placeholder}" >> "$GITHUB_ENV"
 
-      # ── Generate tfvars (not committed — built at runtime) ───────────────
-      - name: Generate tfvars
-        working-directory: infra
-        run: |
-          cat > "${{ env.TFVARS_FILE }}" <<EOF
-          environment   = "${{ env.TF_ENV }}"
-          vpc_cidr      = "${{ env.VPC_CIDR }}"
-          task_cpu      = ${{ env.TASK_CPU }}
-          task_memory   = ${{ env.TASK_MEMORY }}
-          desired_count = ${{ env.DESIRED_COUNT }}
-          image_tag     = "${{ env.IMAGE_TAG }}"
-          EOF
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -116,17 +95,21 @@ jobs:
         run: |
           terraform apply -auto-approve \
             -target=aws_iam_role_policy.github_deploy \
-            -var-file="${{ env.TFVARS_FILE }}"
+            -var-file="${{ env.TFVARS_FILE }}" \
+            -var "image_tag=${{ env.IMAGE_TAG }}"
 
       # ── Plan ─────────────────────────────────────────────────────────────
       # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present
+      # image_tag is overridden from the live ECS task def so an infra-only
+      # apply doesn't revert the service to the fallback tag in tfvars.
       - name: Terraform plan
         id: plan
         working-directory: infra
         run: |
           set +e
           terraform plan -detailed-exitcode -out=tfplan \
-            -var-file="${{ env.TFVARS_FILE }}" 2>&1 | tee plan.txt
+            -var-file="${{ env.TFVARS_FILE }}" \
+            -var "image_tag=${{ env.IMAGE_TAG }}" 2>&1 | tee plan.txt
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
           set -e
 
