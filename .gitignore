@@ -15,6 +15,9 @@ override.tf.json
 *_override.tf.json
 *.tfvars
 *.tfvars.json
+# Per-env tfvars are the source of truth for CI — keep them tracked.
+!infra/dev.tfvars
+!infra/prod.tfvars
 .terraformrc
 terraform.rc
 

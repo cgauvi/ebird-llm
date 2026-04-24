@@ -71,8 +71,9 @@ variable "vpc_cidr" {
 # ---------------------------------------------------------------------------
 
 variable "certificate_arn" {
-  description = "ARN of the ACM certificate to attach to the HTTPS listener (must be in the same region as the ALB)"
+  description = "ARN of the ACM certificate to attach to the HTTPS listener (must be in the same region as the ALB). Injected from the CERTIFICATE_ARN GitHub secret in CI."
   type        = string
+  sensitive   = true
 }
 
 

@@ -96,12 +96,14 @@ jobs:
           terraform apply -auto-approve \
             -target=aws_iam_role_policy.github_deploy \
             -var-file="${{ env.TFVARS_FILE }}" \
-            -var "image_tag=${{ env.IMAGE_TAG }}"
+            -var "image_tag=${{ env.IMAGE_TAG }}" \
+            -var "certificate_arn=${{ secrets.CERTIFICATE_ARN }}"
 
       # ── Plan ─────────────────────────────────────────────────────────────
       # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present
       # image_tag is overridden from the live ECS task def so an infra-only
       # apply doesn't revert the service to the fallback tag in tfvars.
+      # certificate_arn is injected from a GitHub secret.
       - name: Terraform plan
         id: plan
         working-directory: infra
@@ -109,7 +111,8 @@ jobs:
           set +e
           terraform plan -detailed-exitcode -out=tfplan \
             -var-file="${{ env.TFVARS_FILE }}" \
-            -var "image_tag=${{ env.IMAGE_TAG }}" 2>&1 | tee plan.txt
+            -var "image_tag=${{ env.IMAGE_TAG }}" \
+            -var "certificate_arn=${{ secrets.CERTIFICATE_ARN }}" 2>&1 | tee plan.txt
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
           set -e
 

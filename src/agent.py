@@ -39,7 +39,7 @@ from src.tools.ebird_tools import EBIRD_TOOLS
 from src.tools.viz_tools import VIZ_TOOLS
 from src.tools.summarizer_tool import SUMMARIZER_TOOLS
 from src.utils.logging_config import add_log_entry
-from src.utils.state import VizBuffer, get_last_obs_file, get_last_observations
+from src.utils.state import VizBuffer, get_last_obs_file, get_last_observations, get_obs_dataframe
 from src.utils.summarizer import MAX_TOOL_OUTPUT_CHARS, summarize_text
 
 logger = logging.getLogger(__name__)
@@ -409,6 +409,180 @@ def _validate_viz_species_consistency(response_text: str) -> None:
         )
 
 
+def _check_data_coherence(response_text: str) -> str | None:
+    """Detect LLM response claims that contradict the cached observation DataFrame.
+
+    Checks two failure modes:
+
+    1. False absence — the response says species X is not present/listed/found,
+       but the DataFrame has records for X.
+    2. False presence — the response claims species X was observed/seen/recorded,
+       but X does not appear anywhere in the DataFrame.
+
+    Returns a formatted correction note when incoherence is found, else None.
+    Non-blocking — callers append the note rather than raising.
+    """
+    import pandas as pd
+
+    df = get_obs_dataframe()
+    if df is None or df.empty:
+        return None
+
+    has_com_name = "comName" in df.columns
+    has_sp_code = "speciesCode" in df.columns
+    if not has_com_name and not has_sp_code:
+        return None
+
+    # --- build lookup sets from the actual data ---
+    known_codes: set[str] = set()
+    known_names: set[str] = set()  # lower-cased for matching
+    if has_sp_code:
+        known_codes = {str(c).lower() for c in df["speciesCode"].dropna()}
+    if has_com_name:
+        known_names = {str(n).lower() for n in df["comName"].dropna()}
+
+    absence_re = re.compile(
+        r"\b(?:does?\s+not|doesn't|is\s+not|isn't|was\s+not|wasn't|"
+        r"not\s+(?:appear|list|record|find|found|present|observ|includ)|"
+        r"absent|not\s+in\s+(?:that|the|this)\s+(?:set|list|data|record))\b",
+        re.IGNORECASE,
+    )
+    # Positive-presence signals: "observed", "recorded", "spotted", "seen", etc.
+    presence_re = re.compile(
+        r"\b(?:observ(?:ed|ing)|record(?:ed|ing)|spot(?:ted|ting)|"
+        r"seen|found|detected|identified|reported|sighted|appear(?:ed|s)|"
+        r"was\s+present|is\s+present|(?:there\s+(?:were|was)))\b",
+        re.IGNORECASE,
+    )
+
+    sentences = re.split(r'(?<=[.!?–])\s+', response_text)
+
+    key_cols = [c for c in ["comName", "speciesCode"] if c in df.columns]
+    dedup_col = "speciesCode" if has_sp_code else "comName"
+    unique_species = df[key_cols].drop_duplicates(subset=[dedup_col])
+
+    # --- Failure mode 1: false absence (species IS in data but claimed absent) ---
+    false_absences: list[dict] = []
+    seen: set[str] = set()
+
+    for _, row in unique_species.iterrows():
+        com_name = "" if not has_com_name or pd.isna(row.get("comName")) else str(row["comName"])
+        sp_code = "" if not has_sp_code or pd.isna(row.get("speciesCode")) else str(row["speciesCode"])
+        dedup_key = sp_code or com_name
+        if not dedup_key or dedup_key in seen:
+            continue
+
+        for sentence in sentences:
+            s_lower = sentence.lower()
+            mentions = (
+                (com_name and com_name.lower() in s_lower) or
+                (sp_code and sp_code.lower() in s_lower)
+            )
+            if mentions and absence_re.search(sentence):
+                n_records = (
+                    int((df["speciesCode"] == sp_code).sum()) if has_sp_code and sp_code
+                    else int((df["comName"] == com_name).sum())
+                )
+                false_absences.append({"species": com_name or sp_code, "records": n_records})
+                seen.add(dedup_key)
+                break
+
+    # --- Failure mode 2: false presence (species NOT in data but claimed present) ---
+    # Heuristic: extract Title-Cased multi-word sequences (≥2 words) that look like
+    # bird names, then check whether they appear WITH presence language in a sentence
+    # that also references the retrieved data.  Single-word tokens are intentionally
+    # skipped — too many false positives without a complete eBird code dictionary.
+    false_presences: list[str] = []
+    seen_fp: set[str] = set()
+
+    # Require the sentence to reference the retrieved data to reduce false positives
+    # on general-knowledge statements (e.g. "Snowy Owls breed in the Arctic").
+    data_ref_re = re.compile(
+        r"\b(?:data|results?|records?|observations?|dataset|retrieved|returned|"
+        r"retrieved|found|showed?|checked|query|queries|look(?:ed|ing)\s+up)\b",
+        re.IGNORECASE,
+    )
+
+    name_candidates = re.findall(
+        r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b', response_text
+    )
+    for candidate in name_candidates:
+        if candidate in seen_fp:
+            continue
+        # Strip leading articles so "The Snowy Owl" → "Snowy Owl" for lookup
+        clean = re.sub(r'^(?:The|A|An)\s+', '', candidate)
+        if not clean or clean == candidate and len(clean.split()) < 2:
+            continue
+        c_lower = clean.lower()
+        # Also try plural/singular variants for matching
+        variants = {c_lower, c_lower.rstrip('s'), c_lower + 's'}
+        # Pattern to detect the candidate appearing after a location preposition,
+        # which signals a place name rather than a species name.
+        loc_prep_re = re.compile(
+            r'\b(?:near|in|at|around|from|by|within|along|north\s+of|south\s+of|'
+            r'east\s+of|west\s+of)\s+' + re.escape(c_lower),
+            re.IGNORECASE,
+        )
+        for sentence in sentences:
+            s_lower = sentence.lower()
+            if (
+                c_lower in s_lower
+                and presence_re.search(sentence)
+                and data_ref_re.search(sentence)
+                and not loc_prep_re.search(sentence)
+            ):
+                if known_names and not any(v in known_names for v in variants):
+                    false_presences.append(clean)
+                    seen_fp.add(candidate)
+                break
+
+    # --- Build correction note ---
+    issues: list[str] = []
+
+    if false_absences:
+        logger.warning(
+            "_check_data_coherence: false-absence for: %s",
+            [i["species"] for i in false_absences],
+        )
+        add_log_entry(
+            "WARNING", "src.agent",
+            f"Response/data incoherence — claimed absent but present: "
+            f"{[i['species'] for i in false_absences]}",
+        )
+        for item in false_absences:
+            n = item["records"]
+            issues.append(
+                f"- **{item['species']}** appears in the retrieved dataset "
+                f"({n} record{'s' if n != 1 else ''}) but was stated to be absent."
+            )
+
+    if false_presences:
+        logger.warning(
+            "_check_data_coherence: false-presence for: %s", false_presences,
+        )
+        add_log_entry(
+            "WARNING", "src.agent",
+            f"Response/data incoherence — claimed present but absent from dataset: "
+            f"{false_presences}",
+        )
+        for name in false_presences:
+            issues.append(
+                f"- **{name}** was mentioned as observed/present but does not appear "
+                "in the retrieved dataset."
+            )
+
+    if not issues:
+        return None
+
+    lines = [
+        "\n\n---",
+        "**⚠ Data note:** The above response contains statements that "
+        "contradict the retrieved observation data:",
+        *issues,
+    ]
+    return "\n".join(lines)
+
+
 def run_agent(user_input: str, history: list[dict] | None = None) -> str:
     """Run the agent and return its final text response."""
     from langchain_core.messages import ToolMessage
@@ -516,6 +690,11 @@ def run_agent(user_input: str, history: list[dict] | None = None) -> str:
     # Post-invoke consistency check: verify the species the LLM described
     # match what was actually rendered in VizBuffer.
     _validate_viz_species_consistency(response_text)
+
+    # Detect false-absence and false-presence claims against the cached DataFrame.
+    _correction = _check_data_coherence(response_text)
+    if _correction:
+        response_text += _correction
 
     return response_text
 
@@ -825,6 +1004,11 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
     # Post-stream consistency check: verify the species the LLM described
     # match what was actually rendered in VizBuffer.
     _validate_viz_species_consistency(_last_final_content)
+
+    # Detect false-absence and false-presence claims against the cached DataFrame.
+    _correction = _check_data_coherence(_last_final_content)
+    if _correction:
+        yield {"type": "content", "content": _correction}
 
     # --- Log the LLM call to DynamoDB for analytics ---
     _latency_ms = int((time.monotonic() - _t_start) * 1000)
