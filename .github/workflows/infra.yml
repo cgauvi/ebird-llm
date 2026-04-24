@@ -91,6 +91,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~1.5"
+          terraform_wrapper: false   # ← required so PIPESTATUS[0] captures real exit code (esp. -detailed-exitcode=2)
 
       - name: Terraform init
         working-directory: infra
