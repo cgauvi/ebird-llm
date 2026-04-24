@@ -183,6 +183,7 @@ data "aws_iam_policy_document" "github_oidc_assume" {
         "repo:${var.github_repo}:ref:refs/heads/master",
         "repo:${var.github_repo}:ref:refs/heads/main",
         "repo:${var.github_repo}:ref:refs/heads/develop",
+        "repo:${var.github_repo}:pull_request",
         "repo:${var.github_repo}:environment:terraform-apply",
         "repo:${var.github_repo}:environment:terraform-apply-dev",
       ]
