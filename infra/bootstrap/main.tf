@@ -10,8 +10,8 @@
 #   terraform init
 #   terraform apply
 #
-# After apply, copy the outputs into infra/backend-dev.hcl and
-# infra/backend-prod.hcl before running any other terraform commands.
+# After apply, copy the github_deploy_role_arn output into GitHub:
+#   GitHub repo → Settings → Secrets → Actions → AWS_DEPLOY_ROLE_ARN
 
 terraform {
   required_version = ">= 1.5.0"
@@ -107,7 +107,7 @@ resource "aws_dynamodb_table" "tf_locks" {
 }
 
 # ---------------------------------------------------------------------------
-# Outputs — copy these into infra/backend-dev.hcl and infra/backend-prod.hcl
+# Outputs
 # ---------------------------------------------------------------------------
 
 output "state_bucket_name" {
@@ -485,6 +485,27 @@ data "aws_iam_policy_document" "github_deploy" {
       "logs:TagResource",
       "logs:UntagResource",
       "logs:ListTagsForResource",
+    ]
+    resources = ["*"]
+  }
+
+  # --- Application Auto Scaling (scheduled scale-to-zero for ECS) ---
+  statement {
+    sid    = "AppAutoScaling"
+    effect = "Allow"
+    actions = [
+      "application-autoscaling:DeleteScalingPolicy",
+      "application-autoscaling:DeleteScheduledAction",
+      "application-autoscaling:DeregisterScalableTarget",
+      "application-autoscaling:DescribeScalableTargets",
+      "application-autoscaling:DescribeScalingPolicies",
+      "application-autoscaling:DescribeScheduledActions",
+      "application-autoscaling:ListTagsForResource",
+      "application-autoscaling:PutScalingPolicy",
+      "application-autoscaling:PutScheduledAction",
+      "application-autoscaling:RegisterScalableTarget",
+      "application-autoscaling:TagResource",
+      "application-autoscaling:UntagResource",
     ]
     resources = ["*"]
   }
