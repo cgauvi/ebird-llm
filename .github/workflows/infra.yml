@@ -188,7 +188,9 @@ jobs:
       needs.plan.outputs.exit_code == '2'
     runs-on: ubuntu-latest
 
-    environment: terraform-apply  # requires manual approval
+    # Dev auto-applies via terraform-apply-dev (no required reviewers).
+    # Prod routes through terraform-apply, which gates on manual approval.
+    environment: ${{ github.ref_name == 'develop' && 'terraform-apply-dev' || 'terraform-apply' }}
 
     permissions:
       id-token: write
