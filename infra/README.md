@@ -84,9 +84,11 @@ terraform apply
 # Outputs: state_bucket_name = "ebird-llm-tf-state-<account_id>"
 ```
 
-The bucket name is already filled in `backend-dev.hcl` and `backend-prod.hcl`.
-If you recreate the bootstrap in a different account, update the `bucket` value
-in both files.
+The bucket name is derived from your AWS account ID
+(`ebird-llm-tf-state-<account_id>`) and is passed to `terraform init` as
+`-backend-config` CLI flags — see the "Manual Deployment" section below and
+[.github/workflows/infra.yml](../.github/workflows/infra.yml) for the exact
+invocation. No per-env backend file is committed.
 
 ### Step 1 — Bootstrap the GitHub OIDC role (enables CI/CD)
 
@@ -108,8 +110,9 @@ Copy the role ARN into GitHub:
 This bootstrap is per AWS account and repository, not per environment.
 In the current setup:
 
-- `backend-dev.hcl` and `backend-prod.hcl` use the same S3 state bucket and
-  DynamoDB lock table, with different state keys
+- Both environments share the same S3 state bucket and DynamoDB lock table,
+  with different state keys (`ebird-llm/dev/terraform.tfstate` vs
+  `ebird-llm/prod/terraform.tfstate`), supplied via `-backend-config` CLI flags
 - `develop`, `main`, and `master` all assume the same
   `ebird-llm-github-deploy` role
 - Dev and prod are separated by different `.tfvars` values and different
@@ -194,11 +197,22 @@ After that bootstrap, normal CI/CD can update the rest of the stack.
 
 Use this when deploying outside of CI/CD (e.g. first full apply, debugging).
 
+Backend configuration is passed as `-backend-config` CLI flags rather than a
+committed `.hcl` file, so export your AWS account ID once per shell:
+
+```bash
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+```
+
 ### Dev environment
 
 ```bash
 cd infra
-terraform init -backend-config=backend-dev.hcl
+terraform init -reconfigure \
+  -backend-config="bucket=ebird-llm-tf-state-${AWS_ACCOUNT_ID}" \
+  -backend-config="key=ebird-llm/dev/terraform.tfstate" \
+  -backend-config="dynamodb_table=ebird-llm-tf-locks" \
+  -backend-config="encrypt=true"
 terraform apply -var-file=dev.tfvars
 ```
 
@@ -206,7 +220,11 @@ terraform apply -var-file=dev.tfvars
 
 ```bash
 cd infra
-terraform init -backend-config=backend-prod.hcl -reconfigure
+terraform init -reconfigure \
+  -backend-config="bucket=ebird-llm-tf-state-${AWS_ACCOUNT_ID}" \
+  -backend-config="key=ebird-llm/prod/terraform.tfstate" \
+  -backend-config="dynamodb_table=ebird-llm-tf-locks" \
+  -backend-config="encrypt=true"
 terraform apply -var-file=prod.tfvars
 ```
 
@@ -325,8 +343,11 @@ events, with the apply job gated by a GitHub Environment for safety.
 
 The `plan` job:
 
-1. Picks the backend and tfvars file from the branch (`backend-dev.hcl` for
-   `develop`, `backend-prod.hcl` for `main`/`master`).
+1. Picks the state key and tfvars file from the branch
+   (`ebird-llm/dev/terraform.tfstate` + `dev.tfvars` for `develop`,
+   `ebird-llm/prod/terraform.tfstate` + `prod.tfvars` for `main`/`master`).
+   The bucket and lock table are shared; backend values are passed to
+   `terraform init` as `-backend-config` CLI flags.
 2. Reads the currently running image tag from the live ECS task definition
    so an infra-only apply does not accidentally roll back the running app
    version to the `latest` fallback in tfvars.
@@ -435,16 +456,67 @@ aws logs tail /ecs/ebird-llm-dev --follow --region us-east-2
 aws logs tail /ecs/ebird-llm-prod --follow --region us-east-2
 ```
 
-**Tear down an environment:**
+**Tear down an environment (app infrastructure):**
+
+Requires `AWS_ACCOUNT_ID` exported — see "Manual Deployment" above.
+
 ```bash
+cd infra
+
 # Dev
-terraform init -backend-config=backend-dev.hcl -reconfigure
+terraform init -reconfigure \
+  -backend-config="bucket=ebird-llm-tf-state-${AWS_ACCOUNT_ID}" \
+  -backend-config="key=ebird-llm/dev/terraform.tfstate" \
+  -backend-config="dynamodb_table=ebird-llm-tf-locks" \
+  -backend-config="encrypt=true"
 terraform destroy -var-file=dev.tfvars
 
 # Prod
-terraform init -backend-config=backend-prod.hcl -reconfigure
+terraform init -reconfigure \
+  -backend-config="bucket=ebird-llm-tf-state-${AWS_ACCOUNT_ID}" \
+  -backend-config="key=ebird-llm/prod/terraform.tfstate" \
+  -backend-config="dynamodb_table=ebird-llm-tf-locks" \
+  -backend-config="encrypt=true"
 terraform destroy -var-file=prod.tfvars
 ```
+
+The ECR repo has `force_delete = true`, so images will not block destroy.
+SSM parameters, Cognito user pools, DynamoDB app tables, the ALB, and the VPC
+all destroy cleanly.
+
+**Tear down the bootstrap (state bucket, lock table, OIDC provider, deploy role):**
+
+Only do this if you want to fully remove the project from the AWS account.
+It must be run **after** both `dev` and `prod` have been destroyed, since the
+bootstrap owns the bucket that stores their state.
+
+Two things block `terraform destroy` by default:
+
+1. `aws_s3_bucket.tf_state` has `lifecycle { prevent_destroy = true }`. Remove
+   that block in [bootstrap/main.tf](bootstrap/main.tf) before destroying.
+2. The state bucket has versioning enabled and no `force_destroy`, so every
+   object version and delete marker must be removed first.
+
+```bash
+cd infra/bootstrap
+
+# 1. Empty all object versions and delete markers
+BUCKET="ebird-llm-tf-state-${AWS_ACCOUNT_ID}"
+aws s3api delete-objects --bucket "$BUCKET" \
+  --delete "$(aws s3api list-object-versions --bucket "$BUCKET" \
+    --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}')"
+aws s3api delete-objects --bucket "$BUCKET" \
+  --delete "$(aws s3api list-object-versions --bucket "$BUCKET" \
+    --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}')"
+
+# 2. Remove the prevent_destroy lifecycle block on aws_s3_bucket.tf_state,
+#    then destroy — bootstrap uses LOCAL state, so no backend init needed.
+terraform destroy
+```
+
+Destroying the bootstrap also removes the `ebird-llm-github-deploy` role and
+the GitHub OIDC provider, which will break any further CI/CD runs until
+re-bootstrapped.
 
 ---
 
@@ -462,10 +534,27 @@ terraform destroy -var-file=prod.tfvars
 | Resource | Dev (512 CPU / 1 GB) | Prod (1 vCPU / 2 GB) |
 |---|---|---|
 | Fargate task (24/7) | ~$9 | ~$35 |
+| Fargate task (scheduled scaling, 14h/day) | ~$5 | ~$20 |
 | ALB | ~$18 | ~$18 |
 | ECR storage (~1 GB) | ~$0.10 | ~$0.10 |
 | CloudWatch Logs | < $1 | < $1 |
 | SSM parameters | Free tier | Free tier |
-| **Total** | **~$55/month** |
+| **Total (24/7)** | **~$28/month** | **~$54/month** |
+| **Total (scheduled scaling)** | **~$24/month** | **~$39/month** |
 
-Set `desired_count = 0` when the app is not in use to eliminate Fargate costs.
+### Ramp-up / ramp-down (scheduled scaling)
+
+Set `enable_scheduled_scaling = true` to have the ECS service scale to 0 tasks
+overnight and back to `desired_count` during the day. With the default crons
+(`scale_up_cron = cron(0 12 * * ? *)`, `scale_down_cron = cron(0 2 * * ? *)`)
+the service runs ~14 h/day (08:00–22:00 America/Montreal in EDT), which is
+58% of 24/7 — hence the reduced Fargate line above.
+
+Only the Fargate compute cost shrinks with scheduled scaling. The ALB is
+billed whether or not a task is running, and ECR / CloudWatch / SSM are
+effectively flat, so it is the dominant lever only when the task is large
+(prod) or running in both environments at once.
+
+For a full pause set `desired_count = 0` (eliminates Fargate entirely but
+leaves the ALB). To also eliminate the ALB charge, `terraform destroy` the
+environment — see [Day-2 Operations](#day-2-operations).

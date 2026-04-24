@@ -10,8 +10,8 @@
 #   terraform init
 #   terraform apply
 #
-# After apply, copy the outputs into infra/backend-dev.hcl and
-# infra/backend-prod.hcl before running any other terraform commands.
+# After apply, copy the github_deploy_role_arn output into GitHub:
+#   GitHub repo → Settings → Secrets → Actions → AWS_DEPLOY_ROLE_ARN
 
 terraform {
   required_version = ">= 1.5.0"
@@ -107,7 +107,7 @@ resource "aws_dynamodb_table" "tf_locks" {
 }
 
 # ---------------------------------------------------------------------------
-# Outputs — copy these into infra/backend-dev.hcl and infra/backend-prod.hcl
+# Outputs
 # ---------------------------------------------------------------------------
 
 output "state_bucket_name" {
@@ -176,11 +176,16 @@ data "aws_iam_policy_document" "github_oidc_assume" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      # Allow master, main, and develop branches
+      # Branch refs cover the plan job (no environment). Environment subs are
+      # required for the apply job, which routes through a GitHub Environment
+      # and therefore presents an OIDC token with sub=environment:<name>.
       values = [
         "repo:${var.github_repo}:ref:refs/heads/master",
         "repo:${var.github_repo}:ref:refs/heads/main",
         "repo:${var.github_repo}:ref:refs/heads/develop",
+        "repo:${var.github_repo}:pull_request",
+        "repo:${var.github_repo}:environment:terraform-apply",
+        "repo:${var.github_repo}:environment:terraform-apply-dev",
       ]
     }
   }
@@ -265,12 +270,14 @@ data "aws_iam_policy_document" "github_deploy" {
       "ecs:CreateCluster",
       "ecs:DeleteCluster",
       "ecs:DeregisterTaskDefinition",
+      "ecs:DescribeCapacityProviders",
       "ecs:DescribeClusters",
       "ecs:DescribeServices",
       "ecs:DescribeTaskDefinition",
       "ecs:ListClusters",
       "ecs:ListServices",
       "ecs:ListTagsForResource",
+      "ecs:PutClusterCapacityProviders",
       "ecs:RegisterTaskDefinition",
       "ecs:TagResource",
       "ecs:UntagResource",
@@ -348,6 +355,7 @@ data "aws_iam_policy_document" "github_deploy" {
       "elasticloadbalancing:ModifyTargetGroup",
       "elasticloadbalancing:ModifyTargetGroupAttributes",
       "elasticloadbalancing:RemoveTags",
+      "elasticloadbalancing:SetSecurityGroups",
     ]
     resources = ["*"]
   }
@@ -478,6 +486,27 @@ data "aws_iam_policy_document" "github_deploy" {
       "logs:TagResource",
       "logs:UntagResource",
       "logs:ListTagsForResource",
+    ]
+    resources = ["*"]
+  }
+
+  # --- Application Auto Scaling (scheduled scale-to-zero for ECS) ---
+  statement {
+    sid    = "AppAutoScaling"
+    effect = "Allow"
+    actions = [
+      "application-autoscaling:DeleteScalingPolicy",
+      "application-autoscaling:DeleteScheduledAction",
+      "application-autoscaling:DeregisterScalableTarget",
+      "application-autoscaling:DescribeScalableTargets",
+      "application-autoscaling:DescribeScalingPolicies",
+      "application-autoscaling:DescribeScheduledActions",
+      "application-autoscaling:ListTagsForResource",
+      "application-autoscaling:PutScalingPolicy",
+      "application-autoscaling:PutScheduledAction",
+      "application-autoscaling:RegisterScalableTarget",
+      "application-autoscaling:TagResource",
+      "application-autoscaling:UntagResource",
     ]
     resources = ["*"]
   }
