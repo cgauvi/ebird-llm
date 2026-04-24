@@ -54,13 +54,21 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_security_group" "alb" {
   name        = "${local.prefix}-alb-sg"
-  description = "Allow HTTP inbound to the ALB from the internet"
+  description = "Allow HTTP and HTTPS inbound to the ALB from the internet"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description = "HTTP from internet"
+    description = "HTTP from internet (redirected to HTTPS)"
     from_port   = 80
     to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTPS from internet"
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }

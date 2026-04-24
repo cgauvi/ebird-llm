@@ -30,6 +30,11 @@ CMD ["python", "-m", "pytest", "tests/", "-v"]
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM python:3.11-slim-bookworm AS runtime
 
+# Bake the git version into the image at build time.
+# Override with: docker build --build-arg BUILD_VERSION=$(git describe --tags --always) ...
+ARG BUILD_VERSION=local-dev
+ENV BUILD_VERSION=${BUILD_VERSION}
+
 # Non-root user for least-privilege execution
 RUN adduser --disabled-password --gecos "" appuser
 

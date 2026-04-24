@@ -247,6 +247,86 @@ class TestCreateHistoricalChart:
         )
         assert VizBuffer["table"] is None
 
+    # ------------------------------------------------------------------
+    # Line chart — date groupby regression tests
+    # ------------------------------------------------------------------
+
+    # Two Canada Goose records on two DIFFERENT days (different times).
+    # The line chart must produce exactly 2 data points for Canada Goose.
+    _CANADA_GOOSE_TWO_DAYS = [
+        {
+            "comName": "Canada Goose",
+            "sciName": "Branta canadensis",
+            "speciesCode": "cangoo",
+            "howMany": 12,
+            "lat": 45.42,
+            "lng": -75.69,
+            "obsDt": "2024-05-01 07:30",
+            "locName": "Riverside Park",
+            "locId": "L200",
+        },
+        {
+            "comName": "Canada Goose",
+            "sciName": "Branta canadensis",
+            "speciesCode": "cangoo",
+            "howMany": 8,
+            "lat": 45.43,
+            "lng": -75.70,
+            "obsDt": "2024-05-02 15:45",
+            "locName": "Riverside Park",
+            "locId": "L200",
+        },
+    ]
+
+    def test_line_chart_two_days_yields_two_data_points(self):
+        """Canada Goose observed on 2 different days must produce 2 line points."""
+        create_historical_chart.invoke(
+            {
+                "observations_json": json.dumps(self._CANADA_GOOSE_TWO_DAYS),
+                "chart_type": "line",
+            }
+        )
+        fig_dict = VizBuffer["data"]
+        assert fig_dict is not None
+        # Plotly line chart stores one trace per species; find the Canada Goose trace
+        traces = fig_dict["data"]
+        goose_traces = [t for t in traces if "Canada Goose" in str(t.get("name", ""))]
+        assert goose_traces, "No Canada Goose trace found in line chart"
+        x_values = goose_traces[0]["x"]
+        assert len(x_values) == 2, (
+            f"Expected 2 data points for Canada Goose (one per day), got {len(x_values)}: {x_values}"
+        )
+
+    def test_line_chart_same_day_different_times_aggregated(self):
+        """Two Canada Goose observations on the same day at different times must collapse to 1 point."""
+        same_day_obs = [
+            {**self._CANADA_GOOSE_TWO_DAYS[0], "obsDt": "2024-05-01 07:30"},
+            {**self._CANADA_GOOSE_TWO_DAYS[0], "obsDt": "2024-05-01 14:00", "howMany": 5},
+        ]
+        create_historical_chart.invoke(
+            {
+                "observations_json": json.dumps(same_day_obs),
+                "chart_type": "line",
+            }
+        )
+        fig_dict = VizBuffer["data"]
+        traces = fig_dict["data"]
+        goose_traces = [t for t in traces if "Canada Goose" in str(t.get("name", ""))]
+        assert goose_traces, "No Canada Goose trace found in line chart"
+        x_values = goose_traces[0]["x"]
+        assert len(x_values) == 1, (
+            f"Expected 1 data point (same-day records must be aggregated), got {len(x_values)}: {x_values}"
+        )
+        # Count should be summed: 12 + 5 = 17
+        import base64
+        import numpy as np
+        y_raw = goose_traces[0]["y"]
+        if isinstance(y_raw, dict) and "bdata" in y_raw:
+            y_val = np.frombuffer(base64.b64decode(y_raw["bdata"]), dtype=np.dtype(y_raw["dtype"]))[0]
+        else:
+            y_val = list(y_raw)[0]
+        assert y_val == 17, f"Expected aggregated count of 17, got {y_val}"
+
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------

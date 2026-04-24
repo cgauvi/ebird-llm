@@ -82,8 +82,38 @@ def _render_log_into(container, all_entries: list, threshold: int) -> None:
         container.caption("No entries. Run a query to see output.")
 
 
-log_area = None      # set inside sidebar when show_logs is active
-_log_threshold = 1   # default: INFO
+@st.fragment
+def _log_pane_fragment() -> None:
+    """Log-pane toggle + display as a Streamlit fragment.
+
+    Because this is a fragment, clicking the checkbox issues only a
+    *fragment* rerun — not a full-app rerun — so an in-progress
+    streaming call is never interrupted.
+    """
+    _is_dev_inner = os.environ.get("APP_ENV", "dev") != "prod"
+    if not _is_dev_inner:
+        st.session_state["show_logs"] = False
+        return
+
+    st.checkbox("🪵 Show log pane", key="show_logs")
+    if not st.session_state.get("show_logs", False):
+        return
+
+    _LEVEL_OPTIONS = ["DEBUG", "INFO", "WARNING", "ERROR"]
+    selected_level = st.selectbox(
+        "Min level",
+        options=_LEVEL_OPTIONS,
+        index=1,
+        key="log_level_filter",
+    )
+    if st.button("🗑️ Clear logs", use_container_width=True, key="btn_clear_log"):
+        clear_log_buffer()
+        st.session_state.log_entries = []
+        st.rerun(scope="fragment")
+
+    threshold = _LOG_LEVEL_ORDER.get(selected_level, 0)
+    log_display = st.empty()
+    _render_log_into(log_display, st.session_state.log_entries, threshold)
 
 # ---------------------------------------------------------------------------
 # Session state initialisation
@@ -178,9 +208,29 @@ if auth_configured() and not st.session_state.authenticated:
 # Sidebar
 # ---------------------------------------------------------------------------
 
+def _git_version() -> str:
+    """Return the current git tag or short commit hash, e.g. 'v1.2.3' or 'a1b2c3d'.
+
+    Checks the BUILD_VERSION env var first (set at Docker build time), then
+    falls back to a live ``git describe`` for non-containerised local runs.
+    """
+    bv = os.environ.get("BUILD_VERSION", "").strip()
+    if bv:
+        return bv
+    import subprocess
+    try:
+        return subprocess.check_output(
+            ["git", "describe", "--tags", "--always"],
+            stderr=subprocess.DEVNULL,
+            cwd=os.path.dirname(__file__) or ".",
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
 with st.sidebar:
     st.title("🐦 eBird Assistant")
-    st.caption("Powered by LangChain · HuggingFace · eBird API v2")
+    st.caption(f"Powered by LangChain · HuggingFace · eBird API v2 · `{_git_version()}`")
 
     # --- Authenticated user info & sign-out ---
     if st.session_state.authenticated:
@@ -238,26 +288,7 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.checkbox("🪵 Show log pane", key="show_logs")
-
-    if st.session_state.get("show_logs", False):
-        _LEVEL_OPTIONS = ["DEBUG", "INFO", "WARNING", "ERROR"]
-
-        selected_level = st.selectbox(
-            "Min level",
-            options=_LEVEL_OPTIONS,
-            index=1,
-            key="log_level_filter",
-        )
-        if st.button("🗑️ Clear logs", use_container_width=True, key="btn_clear_log"):
-            clear_log_buffer()
-            st.session_state.log_entries = []
-            st.rerun()
-
-        _log_threshold = _LOG_LEVEL_ORDER.get(selected_level, 0)
-        log_area = st.empty()
-        _render_log_into(log_area, st.session_state.log_entries, _log_threshold)
-
+    _log_pane_fragment()
     st.divider()
     st.markdown(
         """
@@ -284,50 +315,58 @@ with viz_col:
     st.subheader("Visualization")
 
     snap = st.session_state.viz_snapshot
-    st.caption(f"Loaded: {snap['type'] or 'none'}")
+    _viz_state_label = st.empty()
+    _viz_state_label.caption(f"Loaded: {snap['type'] or 'none'}")
+    _viz_content = st.empty()
 
-    if snap["type"] == "map":
-        if snap["data"] is not None:
-            from streamlit_folium import st_folium
-            st_folium(
-                snap["data"],
-                height=480,
-                use_container_width=True,
-                returned_objects=[],  # prevent map interactions from triggering reruns
-            )
-            if snap.get("table"):
+    def _render_viz_snap(container, snap):
+        """Render the current viz snapshot into *container*."""
+        if snap["type"] == "map":
+            if snap["data"] is not None:
+                from streamlit_folium import st_folium
+                with container.container():
+                    st_folium(
+                        snap["data"],
+                        height=480,
+                        use_container_width=True,
+                        returned_objects=[],  # prevent map interactions from triggering reruns
+                    )
+                    if snap.get("table"):
+                        import pandas as pd
+                        st.caption(f"{len(snap['table'])} sightings (same as map)")
+                        st.dataframe(
+                            pd.DataFrame(snap["table"]),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+            else:
+                container.error("Map data is empty.")
+
+        elif snap["type"] == "chart":
+            try:
+                import plotly.graph_objects as go
+                fig = go.Figure(snap["data"])
+                container.plotly_chart(fig, use_container_width=True)
+            except Exception as exc:
+                container.error(f"Could not render chart: {exc}")
+
+        elif snap["type"] == "dataframe":
+            if snap.get("data"):
                 import pandas as pd
-                st.caption(f"{len(snap['table'])} sightings (same as map)")
-                st.dataframe(
-                    pd.DataFrame(snap["table"]),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                df = pd.DataFrame(snap["data"])
+                with container.container():
+                    if snap.get("title"):
+                        st.caption(snap["title"])
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                container.error("Dataframe data is empty.")
+
         else:
-            st.error("Map data is empty.")
+            container.info(
+                "Ask the assistant about bird sightings and a map or chart will appear here."
+            )
 
-    elif snap["type"] == "chart":
-        try:
-            import plotly.graph_objects as go
-            fig = go.Figure(snap["data"])
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as exc:
-            st.error(f"Could not render chart: {exc}")
-
-    elif snap["type"] == "dataframe":
-        if snap.get("data"):
-            import pandas as pd
-            df = pd.DataFrame(snap["data"])
-            if snap.get("title"):
-                st.caption(snap["title"])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.error("Dataframe data is empty.")
-
-    else:
-        st.info(
-            "Ask the assistant about bird sightings and a map or chart will appear here."
-        )
+    _render_viz_snap(_viz_content, snap)
 
 # ---------------------------------------------------------------------------
 # Left column — chat panel
@@ -352,13 +391,7 @@ with chat_col:
             icon="🛑",
         )
 
-    # Chat input at the top
-    user_input = st.chat_input(
-        "Ask about birds, regions, sightings, hotspots…",
-        disabled=not (ebird_ok and llm_ok) or limit_reached,
-    )
-
-    # Scrollable chat history below the input
+    # Scrollable chat history above the input
     history_container = st.container(height=600, border=False)
     with history_container:
         for msg in st.session_state.messages:
@@ -387,6 +420,12 @@ with chat_col:
             height=0,
         )
 
+    # Chat input below the history
+    user_input = st.chat_input(
+        "Ask about birds, regions, sightings, hotspots…",
+        disabled=not (ebird_ok and llm_ok) or limit_reached,
+    )
+
     if user_input:
         import src.utils.state as _state
         import src.agent as _agent_mod
@@ -411,9 +450,16 @@ with chat_col:
             st.stop()
 
         _state.clear_viz_buffer()
-        # Drop stale table immediately so it doesn't persist during intermediate
-        # re-renders while the agent is working on the new map.
-        st.session_state.viz_snapshot["table"] = None
+        # Clear the entire snapshot so stale visuals don't linger when the
+        # agent responds with a clarification question instead of producing
+        # a new chart or map.
+        st.session_state.viz_snapshot = {"type": None, "data": None, "title": None, "table": None}
+        # Flush the viz pane immediately so stale maps/charts/dataframes
+        # don't persist visually while the new query is being processed.
+        _viz_state_label.caption("Loaded: none")
+        _viz_content.info(
+            "Ask the assistant about bird sightings and a map or chart will appear here."
+        )
         response = ""
 
         # Stream the agent, showing live progress via st.status
@@ -444,13 +490,13 @@ with chat_col:
                         st.write("✓ Done")
                     elif event["type"] == "final":
                         response = event["content"]
-                    # Live-drain log buffer so the sidebar pane updates incrementally
+                    # Drain log buffer into session state so logs persist
+                    # across the final rerun (live fragment updates are not
+                    # possible while the main script is streaming).
                     _new_logs = list(LogBuffer)
                     if _new_logs:
                         st.session_state.log_entries.extend(_new_logs)
                         clear_log_buffer()
-                        if log_area is not None:
-                            _render_log_into(log_area, st.session_state.log_entries, _log_threshold)
                 status.update(label="Done", state="complete", expanded=False)
             except Exception as exc:
                 response = f"⚠️ An error occurred: {exc}"

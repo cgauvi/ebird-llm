@@ -306,8 +306,9 @@ automated:
 | `develop` | push | `ebird-llm-dev` |
 | `main` / `master` | push | `ebird-llm-prod` |
 
-The deploy workflow (`.github/workflows/deploy.yml`) only runs after the
-`Unit Tests` workflow succeeds. It:
+### Application deploy (`.github/workflows/deploy.yml`)
+
+Runs only after the `Unit Tests` workflow succeeds. It:
 
 1. Builds the `runtime` Docker stage and pushes to ECR with three tags:
    - `<7-char git SHA>` — immutable, for traceability
@@ -316,9 +317,52 @@ The deploy workflow (`.github/workflows/deploy.yml`) only runs after the
 2. Registers a new ECS task definition revision pointing to the SHA-tagged image
 3. Updates the ECS service to use the new revision
 
-> Infrastructure changes (cluster, VPC, IAM, SSM parameters, …) are managed
-> separately by manually running `terraform apply` — the deploy workflow only
-> updates the running container image.
+### Infrastructure (`.github/workflows/infra.yml`)
+
+Triggered on pushes and pull requests to `develop`, `main`, or `master`
+whenever `infra/**` changes. It plans unconditionally and applies on push
+events, with the apply job gated by a GitHub Environment for safety.
+
+The `plan` job:
+
+1. Picks the backend and tfvars file from the branch (`backend-dev.hcl` for
+   `develop`, `backend-prod.hcl` for `main`/`master`).
+2. Reads the currently running image tag from the live ECS task definition
+   so an infra-only apply does not accidentally roll back the running app
+   version to the `latest` fallback in tfvars.
+3. Runs a targeted `terraform apply` against `aws_iam_role_policy.github_deploy`
+   so the deploy role can refresh state on the next plan (no-op once in sync).
+4. Runs `terraform plan -detailed-exitcode -out=tfplan`, posts the plan to the
+   workflow summary and (on PRs) as a comment, and uploads `tfplan` as an
+   artifact.
+
+The `apply` job runs on push events only and downloads the exact plan
+artifact from the `plan` job, then runs `terraform apply tfplan`. No
+`-auto-approve` is needed because a saved plan skips the prompt.
+
+#### GitHub Environments required
+
+The `apply` job routes to a different environment per branch:
+
+```yaml
+environment: ${{ github.ref_name == 'develop' && 'terraform-apply-dev' || 'terraform-apply' }}
+```
+
+Configure both in **Settings → Environments**:
+
+| Environment | Required reviewers | Used by |
+|---|---|---|
+| `terraform-apply-dev` | none | pushes to `develop` — auto-applies |
+| `terraform-apply` | you / your team | pushes to `main`/`master` — pauses for manual approval |
+
+If `terraform-apply-dev` does not exist, pushes to `develop` will fail with
+an environment-not-found error. If the `terraform-apply` environment has no
+reviewers configured, prod pushes will apply without human review.
+
+#### Concurrency
+
+One Terraform operation per branch at a time (`cancel-in-progress: false`),
+so a running apply is never interrupted by a newer push.
 
 ---
 
@@ -336,6 +380,11 @@ The deploy workflow (`.github/workflows/deploy.yml`) only runs after the
 | `task_memory` | `2048` | Fargate memory (MiB) |
 | `desired_count` | `1` | Number of running ECS tasks (set to `0` to pause) |
 | `streamlit_port` | `8501` | Container port Streamlit listens on |
+| `enable_spot` | `false` | If `true`, prefer `FARGATE_SPOT` (weight 3) with on-demand `FARGATE` fallback (weight 1). Cheaper but interruptible. |
+| `enable_scheduled_scaling` | `false` | If `true`, create Application Auto Scaling scheduled actions to scale the ECS service to zero off-hours and back up during business hours. |
+| `scale_down_cron` | `cron(0 2 * * ? *)` | UTC cron for scale-to-zero. Default = 22:00 America/Montreal in EDT; drifts +1h in EST (winter). |
+| `scale_up_cron` | `cron(0 12 * * ? *)` | UTC cron for scale-up. Default = 08:00 America/Montreal in EDT; drifts +1h in EST (winter). |
+| `certificate_arn` | — (required) | ACM certificate ARN for the HTTPS listener. Injected from the `CERTIFICATE_ARN` GitHub secret in CI. |
 
 ---
 

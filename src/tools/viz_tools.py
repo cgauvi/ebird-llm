@@ -266,6 +266,19 @@ def create_historical_chart(
     if "comName" not in df.columns:
         raise ToolException("Observation records are missing the 'comName' field.")
 
+    n_unique = df["comName"].nunique()
+    sole_species = df["comName"].iloc[0] if n_unique == 1 else None
+
+    def _species_qualifier(base_multi: str, base_single: str | None = None) -> str:
+        """Return a title string adjusted for how many species are in the data."""
+        if sole_species:
+            return base_single or f"{sole_species} — {base_multi}"
+        if n_unique <= top_n_species:
+            return base_multi.replace(f" (top {top_n_species} species)", "").replace(
+                f"Top {top_n_species} Species by ", "Species by "
+            ).replace(f"top {top_n_species} species, ", "")
+        return base_multi
+
     if chart_type == "bar":
         summary = (
             df.groupby("comName", as_index=False)["howMany"]
@@ -277,7 +290,10 @@ def create_historical_chart(
             summary,
             x="comName",
             y="howMany",
-            title=f"Top {top_n_species} Species by Observation Count",
+            title=_species_qualifier(
+                f"Top {top_n_species} Species by Observation Count",
+                f"{sole_species} — Observation Count",
+            ),
             labels={"comName": "Species", "howMany": "Count"},
             color="comName",
             color_discrete_sequence=px.colors.qualitative.Set2,
@@ -294,7 +310,7 @@ def create_historical_chart(
                 "Observation records are missing the 'obsDt' field required "
                 "for a time-series chart. Try chart_type='bar' instead."
             )
-        df["date"] = pd.to_datetime(df["obsDt"], format="mixed").dt.date
+        df["date"] = pd.to_datetime(df["obsDt"], format="mixed").dt.normalize()
         time_summary = (
             df.groupby(["date", "comName"], as_index=False)["howMany"].sum()
         )
@@ -310,7 +326,10 @@ def create_historical_chart(
             x="date",
             y="howMany",
             color="comName",
-            title=f"Observations Over Time (top {top_n_species} species)",
+            title=_species_qualifier(
+                f"Observations Over Time (top {top_n_species} species)",
+                f"{sole_species} — Observations Over Time",
+            ),
             labels={"date": "Date", "howMany": "Count", "comName": "Species"},
             markers=True,
         )
@@ -322,7 +341,7 @@ def create_historical_chart(
                 "Observation records are missing the 'obsDt' field required "
                 "for a scatter/regression chart. Try chart_type='bar' instead."
             )
-        df["date"] = pd.to_datetime(df["obsDt"], format="mixed").dt.date
+        df["date"] = pd.to_datetime(df["obsDt"], format="mixed").dt.normalize()
         top_species = (
             df.groupby("comName")["howMany"]
             .sum()
@@ -330,14 +349,16 @@ def create_historical_chart(
             .index.tolist()
         )
         scatter_df = df[df["comName"].isin(top_species)].copy()
-        scatter_df["date"] = pd.to_datetime(scatter_df["date"])
         fig = px.scatter(
             scatter_df,
             x="date",
             y="howMany",
             color="comName",
             trendline="ols",
-            title=f"Observations with OLS Regression (top {top_n_species} species)",
+            title=_species_qualifier(
+                f"Observations with OLS Regression (top {top_n_species} species)",
+                f"{sole_species} — Observations with OLS Regression",
+            ),
             labels={"date": "Date", "howMany": "Count", "comName": "Species"},
         )
         fig.update_layout(margin={"t": 50, "b": 60})
@@ -370,7 +391,10 @@ def create_historical_chart(
             hoverongaps=False,
         ))
         fig.update_layout(
-            title=f"Observation Heatmap (top {top_n_species} species)",
+            title=_species_qualifier(
+                f"Observation Heatmap (top {top_n_species} species)",
+                f"{sole_species} — Observation Heatmap",
+            ),
             xaxis_title="Date",
             yaxis_title="Species",
             margin={"t": 50, "b": 80},
@@ -403,7 +427,10 @@ def create_historical_chart(
             y="howMany",
             facet_col="locName",
             facet_col_wrap=2,
-            title=f"Species Counts by Location (top {top_n_species} species, top 6 locations)",
+            title=_species_qualifier(
+                f"Species Counts by Location (top {top_n_species} species, top 6 locations)",
+                f"{sole_species} — Counts by Location",
+            ),
             labels={"comName": "Species", "howMany": "Count", "locName": "Location"},
             color="comName",
             color_discrete_sequence=px.colors.qualitative.Set2,
@@ -428,7 +455,10 @@ def create_historical_chart(
             box_df,
             x="comName",
             y="howMany",
-            title=f"Count Distribution per Species (top {top_n_species})",
+            title=_species_qualifier(
+                f"Count Distribution per Species (top {top_n_species})",
+                f"{sole_species} — Count Distribution",
+            ),
             labels={"comName": "Species", "howMany": "Count"},
             color="comName",
             color_discrete_sequence=px.colors.qualitative.Set2,

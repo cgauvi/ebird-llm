@@ -101,6 +101,51 @@ HISTORIC_OBS = [
     },
 ]
 
+# Species-filtered observations that mirror the exact failure the user reported:
+# get_recent_observations_by_location(species_code='y00678') returned records
+# whose dates were months in the past, while the map correctly used fresh data.
+# These dates are intentionally far outside any reasonable days_back window so
+# that every recency assertion that should fail actually does fail.
+_STALE_DATE_1 = datetime.date(2024, 4, 18)
+_STALE_DATE_2 = datetime.date(2024, 4, 20)
+_STALE_DATE_3 = datetime.date(2024, 4, 22)
+
+SPECIES_FILTERED_STALE_OBS = [
+    {
+         "speciesCode": "y00678",
+        "comName": "Crested Caracara",
+        "sciName": "Caracara plancus",
+        "howMany": 1,
+        "lat": 46.78,
+        "lng": -71.35,
+        "obsDt": _STALE_DATE_1.strftime("%Y-%m-%d 08:00"),
+        "locName": "Parc de la Cité",
+        "locId": "L600",
+    },
+    {
+         "speciesCode": "y00678",
+        "comName": "Crested Caracara",
+        "sciName": "Caracara plancus",
+        "howMany": 1,
+        "lat": 46.85,
+        "lng": -71.00,
+        "obsDt": _STALE_DATE_2.strftime("%Y-%m-%d 09:30"),
+        "locName": "Île d'Orléans",
+        "locId": "L601",
+    },
+    {
+         "speciesCode": "y00678",
+        "comName": "Crested Caracara",
+        "sciName": "Caracara plancus",
+        "howMany": 1,
+        "lat": 45.52,
+        "lng": -73.59,
+        "obsDt": _STALE_DATE_3.strftime("%Y-%m-%d 10:15"),
+        "locName": "Mont-Royal",
+        "locId": "L602",
+    },
+]
+
 # Snow Goose sightings near Quebec City — mirrors the fixed LLM response in
 # TestLLMOutputMapConsistency.  Only goose species are present so the
 # "goose-only" assertion must pass.
@@ -834,4 +879,252 @@ class TestDataframeConsistency:
         assert table_count >= map_table_count, (
             f"Dataframe ({table_count} rows) should have at least as many rows "
             f"as the map table ({map_table_count} rows)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helper shared by sections 6 and 7
+# ---------------------------------------------------------------------------
+
+
+def _table_date_set(vizbuffer_data: list[dict]) -> set[datetime.date]:
+    """Set of dates from VizBuffer['data'] (show_observations_table output)."""
+    dates: set[datetime.date] = set()
+    for row in vizbuffer_data:
+        raw = row.get("Date", "")
+        if raw:
+            dates.add(datetime.date.fromisoformat(raw[:10]))
+    return dates
+
+
+# ---------------------------------------------------------------------------
+# 6. Recent observations by-location with species_code filter
+#    When filtering by species code, both the table and the map must honour
+#    the days_back recency window — and both surfaces must agree on dates.
+#
+#    Root cause of the reported bug:
+#      get_recent_observations_by_location(species_code='y00678') returned
+#      records with dates from April 2024 (well outside any reasonable
+#      days_back window), yet the map showed "correct" data because it
+#      happened to read the same cached response.  The table echoed the
+#      stale dates verbatim, giving the impression only the table was wrong.
+#
+#    These tests confirm that a date-recency guard catches this failure on
+#    both surfaces, and that passing genuinely fresh records clears the guard.
+# ---------------------------------------------------------------------------
+
+
+class TestRecentObsWithSpeciesFilterConsistency:
+    """Table and map both surface stale dates when a species-filtered
+    recent-obs call returns out-of-window records."""
+
+    def test_stale_species_filtered_obs_fail_date_check_in_table(self, mock_client):
+        """Stale dates from a species-filtered recent-obs call must be detectable
+        in the table — confirming the recency guard covers the species-code path."""
+        days_back = 7
+        mock_client.recent_observations_by_location.return_value = SPECIES_FILTERED_STALE_OBS
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 46.81, "lng": -71.21, "days_back": days_back, "species_code": "y00678"}
+        )
+        show_observations_table.invoke({})
+
+        cutoff = _TODAY - datetime.timedelta(days=days_back)
+        stale_rows = [
+            row for row in VizBuffer["data"]
+            if datetime.date.fromisoformat(row["Date"][:10]) < cutoff
+        ]
+        assert stale_rows, (
+            "Expected stale dates (April 2024) to appear in the table for "
+            "a species-filtered recent-obs call — the recency guard is not "
+            "catching this path."
+        )
+
+    def test_stale_species_filtered_obs_fail_date_check_in_map(self, mock_client):
+        """Stale dates from a species-filtered recent-obs call must also be
+        detectable in the map, confirming both surfaces are equally vulnerable."""
+        days_back = 7
+        mock_client.recent_observations_by_location.return_value = SPECIES_FILTERED_STALE_OBS
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 46.81, "lng": -71.21, "days_back": days_back, "species_code": "y00678"}
+        )
+        create_sightings_map.invoke({})
+
+        assert not _vizbuffer_dates_all_within(days_back), (
+            "Expected stale dates to fail the map recency check for a "
+            "species-filtered recent-obs call, but _vizbuffer_dates_all_within "
+            "returned True unexpectedly."
+        )
+
+    def test_fresh_species_filtered_obs_pass_date_check_in_table(self, mock_client):
+        """Genuinely recent records filtered by species_code must pass the
+        table recency check — ensuring the guard does not produce false positives."""
+        days_back = 7
+        recent_species_obs = [
+            {**SPECIES_FILTERED_STALE_OBS[0], "obsDt": _YESTERDAY.strftime("%Y-%m-%d 08:00")},
+            {**SPECIES_FILTERED_STALE_OBS[1], "obsDt": _THREE_DAYS_AGO.strftime("%Y-%m-%d 09:30")},
+        ]
+        mock_client.recent_observations_by_location.return_value = recent_species_obs
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 46.81, "lng": -71.21, "days_back": days_back, "species_code": "y00678"}
+        )
+        show_observations_table.invoke({})
+
+        cutoff = _TODAY - datetime.timedelta(days=days_back)
+        stale_rows = [
+            row for row in VizBuffer["data"]
+            if datetime.date.fromisoformat(row["Date"][:10]) < cutoff
+        ]
+        assert not stale_rows, (
+            "Fresh species-filtered observations should all pass the recency check "
+            f"but found out-of-window rows: {stale_rows}"
+        )
+
+    def test_fresh_species_filtered_obs_pass_date_check_in_map(self, mock_client):
+        """Genuinely recent records filtered by species_code must pass the
+        map recency check."""
+        days_back = 7
+        recent_species_obs = [
+            {**SPECIES_FILTERED_STALE_OBS[0], "obsDt": _YESTERDAY.strftime("%Y-%m-%d 08:00")},
+            {**SPECIES_FILTERED_STALE_OBS[1], "obsDt": _THREE_DAYS_AGO.strftime("%Y-%m-%d 09:30")},
+        ]
+        mock_client.recent_observations_by_location.return_value = recent_species_obs
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 46.81, "lng": -71.21, "days_back": days_back, "species_code": "y00678"}
+        )
+        create_sightings_map.invoke({})
+
+        assert _vizbuffer_dates_all_within(days_back), (
+            f"Map dates for fresh species-filtered observations should all be "
+            f"within the {days_back}-day window."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 7. Table ↔ map date parity
+#    The set of dates rendered by show_observations_table must equal the set
+#    rendered by create_sightings_map when both are called after the same
+#    eBird tool invocation.
+#
+#    The critical failure mode: the LLM injects stale JSON directly into
+#    show_observations_table (bypassing the session cache) while
+#    create_sightings_map loads from the cache and shows fresh dates.  This
+#    produces a visible mismatch between the table and the map — the exact
+#    symptom described in the bug report.
+# ---------------------------------------------------------------------------
+
+
+class TestTableMapDateParity:
+    """show_observations_table and create_sightings_map must show the same dates."""
+
+    def test_table_and_map_date_sets_are_identical(self, mock_client):
+        """Dates in the table must exactly equal dates in the map table."""
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+
+        show_observations_table.invoke({})
+        table_dates = _table_date_set(VizBuffer["data"])
+
+        create_sightings_map.invoke({})
+        map_dates = {d for d in _map_dates(VizBuffer["table"])}
+
+        assert table_dates == map_dates, (
+            f"Table dates {table_dates} differ from map dates {map_dates}. "
+            "Both surfaces must reflect the same underlying observations."
+        )
+
+    def test_stale_json_injection_causes_table_map_date_mismatch(self, mock_client):
+        """Guard test: when the LLM injects stale JSON into show_observations_table,
+        the table dates diverge from the map dates — proving the mismatch is
+        detectable.  This is the exact failure mode in the bug report."""
+        days_back = 7
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        # Populate the session cache with fresh data.
+        get_recent_observations_by_location.invoke(
+            {"lat": 40.78, "lng": -73.97, "days_back": days_back}
+        )
+
+        # LLM explicitly injects stale JSON (April 2024 dates) into the table.
+        stale_json = json.dumps(SPECIES_FILTERED_STALE_OBS)
+        show_observations_table.invoke({"observations_json": stale_json})
+        table_dates = _table_date_set(VizBuffer["data"])
+
+        # Map loads from the session cache → fresh dates.
+        create_sightings_map.invoke({})
+        map_dates = {d for d in _map_dates(VizBuffer["table"])}
+
+        assert table_dates != map_dates, (
+            "Expected table dates (stale April 2024) to differ from map dates "
+            "(fresh session-cache data), but they matched — the mismatch guard "
+            "is broken."
+        )
+
+    def test_stale_json_injection_fails_recency_check_in_table(self, mock_client):
+        """When the LLM bypasses the cache and passes stale JSON to
+        show_observations_table, the dates must fail the recency check."""
+        days_back = 7
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 40.78, "lng": -73.97, "days_back": days_back}
+        )
+
+        stale_json = json.dumps(SPECIES_FILTERED_STALE_OBS)
+        show_observations_table.invoke({"observations_json": stale_json})
+
+        cutoff = _TODAY - datetime.timedelta(days=days_back)
+        stale_rows = [
+            row for row in VizBuffer["data"]
+            if datetime.date.fromisoformat(row["Date"][:10]) < cutoff
+        ]
+        assert stale_rows, (
+            "Expected stale rows after LLM injected old JSON into "
+            "show_observations_table, but none were detected — the recency "
+            "guard is not catching this injection path."
+        )
+
+    def test_table_and_map_dates_agree_with_species_filter(self, mock_client):
+        """After a species-code-filtered recent-obs call, table and map dates
+        must match — ruling out cache-vs-injection divergence for this path."""
+        recent_species_obs = [
+            {**SPECIES_FILTERED_STALE_OBS[0], "obsDt": _YESTERDAY.strftime("%Y-%m-%d 08:00")},
+            {**SPECIES_FILTERED_STALE_OBS[1], "obsDt": _THREE_DAYS_AGO.strftime("%Y-%m-%d 09:30")},
+        ]
+        mock_client.recent_observations_by_location.return_value = recent_species_obs
+
+        get_recent_observations_by_location.invoke(
+            {"lat": 46.81, "lng": -71.21, "days_back": 7, "species_code": "y00678"}
+        )
+
+        show_observations_table.invoke({})
+        table_dates = _table_date_set(VizBuffer["data"])
+
+        create_sightings_map.invoke({})
+        map_dates = {d for d in _map_dates(VizBuffer["table"])}
+
+        assert table_dates == map_dates, (
+            f"After a species-filtered call, table dates {table_dates} differ "
+            f"from map dates {map_dates}. Both tools read from the same cache."
+        )
+
+    def test_table_location_set_matches_map_location_set(self, mock_client):
+        """Locations in the table must equal locations in the map for the same
+        observations (using a dataset small enough to be uncapped by the map)."""
+        mock_client.recent_observations_by_location.return_value = RECENT_OBS
+
+        get_recent_observations_by_location.invoke({"lat": 40.78, "lng": -73.97})
+
+        show_observations_table.invoke({})
+        table_locs = {row.get("Location") for row in VizBuffer["data"]}
+
+        create_sightings_map.invoke({})
+        map_locs = {row.get("Location") for row in VizBuffer["table"]}
+
+        assert table_locs == map_locs, (
+            f"Table locations {table_locs} differ from map locations {map_locs}."
         )

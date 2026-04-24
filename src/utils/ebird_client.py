@@ -5,11 +5,14 @@ Reads EBIRD_API_KEY from the environment and injects it as the
 x-ebirdapitoken request header for every call.
 """
 
+import logging
 import os
 import time
 from typing import Any
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 BASE_URL = "https://api.ebird.org/v2"
@@ -51,6 +54,10 @@ class EBirdClient:
 
         url = f"{BASE_URL}{path}"
         response = self._session.get(url, params=params, timeout=15)
+        # Log the equivalent curl command for validation/debugging (key redacted).
+        prepared = response.request
+        curl_url = prepared.url or url
+        logger.info("eBird API call: curl -s -H 'x-ebirdapitoken: <REDACTED>' '%s'", curl_url)
         if not response.ok:
             raise EBirdError(
                 f"eBird API error {response.status_code} for {url}: {response.text}"
@@ -128,13 +135,25 @@ class EBirdClient:
 
     def nearby_hotspots(
         self,
-        lat: float,
-        lng: float,
+        lat: float | None = None,
+        lng: float | None = None,
         dist: int = 25,
+        region_code: str | None = None,
     ) -> list[dict]:
-        """eBird hotspots within dist km of a point."""
-        params: dict[str, Any] = {"lat": lat, "lng": lng, "dist": dist}
-        return self._get("/ref/hotspot/geo", params)
+        """eBird hotspots by region or within dist km of a point.
+
+        If region_code is provided, use /ref/hotspot/{region_code} (JSON).
+        Otherwise, use /ref/hotspot/geo with lat/lng (JSON).
+        """
+        if region_code:
+            path = f"/ref/hotspot/{region_code}"
+            params = {"fmt": "json"}
+            return self._get(path, params)
+        elif lat is not None and lng is not None:
+            params = {"lat": lat, "lng": lng, "dist": dist, "fmt": "json"}
+            return self._get("/ref/hotspot/geo", params)
+        else:
+            raise ValueError("Must provide either region_code or lat/lng for hotspot lookup.")
 
     # ------------------------------------------------------------------
     # Regions

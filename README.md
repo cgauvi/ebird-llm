@@ -169,7 +169,8 @@ The app opens at `http://localhost:8501`.
 Build and run the production image locally, using the same `.env` file for API keys:
 
 ```bash
-docker build --target runtime -t ebird-llm-local .
+docker build --target runtime -t ebird-llm-local \
+  --build-arg BUILD_VERSION=$(git describe --tags --always) .
 docker run --rm -p 8501:8501 --env-file .env --no-healthcheck --privileged ebird-llm-local
 ```
 
