@@ -1,6 +1,16 @@
 name: Deploy
 
 on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [dev, prod]
+      image_tag:
+        description: 'Image tag to deploy (leave blank to build + push from current HEAD)'
+        required: false
   # Triggers only after Unit Tests pass on the deployment branches.
   # workflow_run fires regardless of the paths filter on the source workflow,
   # so we check whether the triggering run involved app/src changes by
@@ -15,13 +25,13 @@ on:
 # One live deployment per environment at a time.
 # cancel-in-progress: false ensures we never abort a deploy already in flight.
 concurrency:
-  group: deploy-${{ github.event.workflow_run.head_branch }}
+  group: deploy-${{ inputs.environment || github.event.workflow_run.head_branch || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   deploy:
-    # Only run when the triggering test workflow succeeded
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Only run when the triggering test workflow succeeded, or on manual dispatch.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     runs-on: ubuntu-latest
 
@@ -33,21 +43,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Check out the exact commit that triggered the upstream workflow_run
-          ref: ${{ github.event.workflow_run.head_sha }}
+          # For workflow_run events, check out the exact commit that triggered the upstream workflow.
+          # For workflow_dispatch, github.sha is already the correct ref.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
-      # ── Determine environment from branch ─────────────────────────────────
+      # ── Determine environment from branch or manual input ─────────────────
       - name: Set deployment environment
         run: |
-          BRANCH="${{ github.event.workflow_run.head_branch }}"
-          if [[ "$BRANCH" == "master" || "$BRANCH" == "main" ]]; then
-            echo "TF_ENV=prod" >> "$GITHUB_ENV"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TF_ENV="${{ inputs.environment }}"
+            SHA="${{ github.sha }}"
+            PROVIDED_TAG="${{ inputs.image_tag }}"
+            IMAGE_TAG="${PROVIDED_TAG:-${SHA:0:7}}"
+            # Skip build+push when an existing image tag is provided
+            [[ -n "$PROVIDED_TAG" ]] && SKIP_BUILD=true || SKIP_BUILD=false
           else
-            echo "TF_ENV=dev"  >> "$GITHUB_ENV"
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+            if [[ "$BRANCH" == "master" || "$BRANCH" == "main" ]]; then
+              TF_ENV=prod
+            else
+              TF_ENV=dev
+            fi
+            SHA="${{ github.event.workflow_run.head_sha }}"
+            IMAGE_TAG="${SHA:0:7}"
+            SKIP_BUILD=false
           fi
-          # Use the short SHA as the image tag for traceability
-          echo "IMAGE_TAG=$(echo '${{ github.event.workflow_run.head_sha }}' | cut -c1-7)" >> "$GITHUB_ENV"
+          echo "TF_ENV=$TF_ENV"         >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$IMAGE_TAG"   >> "$GITHUB_ENV"
+          echo "SKIP_BUILD=$SKIP_BUILD" >> "$GITHUB_ENV"
           # Human-readable version: tag if present (e.g. v1.2.3), otherwise tag+distance+sha
           echo "BUILD_VERSION=$(git describe --tags --always)" >> "$GITHUB_ENV"
 
@@ -64,9 +88,11 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up Docker Buildx
+        if: env.SKIP_BUILD == 'false'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push runtime image
+        if: env.SKIP_BUILD == 'false'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -75,9 +101,9 @@ jobs:
           push: true
           build-args: BUILD_VERSION=${{ env.BUILD_VERSION }}
           # Three tags per push:
-          #   <sha>       — immutable, for traceability
+          #   <sha>        — immutable, for traceability
           #   <env>-latest — env-scoped mutable pointer
-          #   latest      — keeps Terraform's fallback image_tag resolvable
+          #   latest       — keeps Terraform's fallback image_tag resolvable
           tags: |
             ${{ steps.ecr_login.outputs.registry }}/ebird-llm-${{ env.TF_ENV }}:${{ env.IMAGE_TAG }}
             ${{ steps.ecr_login.outputs.registry }}/ebird-llm-${{ env.TF_ENV }}:${{ env.TF_ENV }}-latest
