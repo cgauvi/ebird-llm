@@ -53,7 +53,11 @@ resource "aws_route_table_association" "public" {
 # ---------------------------------------------------------------------------
 
 resource "aws_security_group" "alb" {
-  name        = "${local.prefix}-alb-sg"
+  # name_prefix (instead of name) pairs with create_before_destroy so AWS can
+  # create the replacement SG alongside the old one — a fixed name would
+  # collide on InvalidGroup.Duplicate. Immutable fields like description
+  # therefore become safely editable.
+  name_prefix = "${local.prefix}-alb-sg-"
   description = "Allow HTTP and HTTPS inbound to the ALB from the internet"
   vpc_id      = aws_vpc.main.id
 
@@ -78,6 +82,10 @@ resource "aws_security_group" "alb" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
