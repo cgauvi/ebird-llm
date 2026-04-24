@@ -185,6 +185,17 @@ Workflow guidelines:
    to provide a latitude/longitude or a known eBird region code.
 5. Never fabricate species counts or locations — always use tool results.
 
+Clarification rules (CRITICAL — never render while asking):
+- If you ask the user a clarifying question about output type — e.g. "Would you
+  like a map, a chart, or just the data?" — you MUST NOT call
+  create_sightings_map, create_historical_chart, or any other visualization
+  tool in that same turn. Your response for that turn must be the question
+  alone. Wait for the user's reply, then render only the output they chose.
+- The same rule applies to any clarifying question about region, species, or
+  date: ask the question and stop. Do not render a "default" map/chart/data
+  frame while waiting for the answer — that defeats the purpose of asking and
+  fills the viz frame with something the user did not request.
+
 Ambiguity resolution — session memory (CRITICAL):
 - When the user's request is vague about region, date, or species — e.g. they say
   "same region", "same place", "that area", "yesterday's date", "those birds",
@@ -351,6 +362,14 @@ def _build_messages(
 # ---------------------------------------------------------------------------
 # Post-response consistency validation
 # ---------------------------------------------------------------------------
+
+def _is_clarifying_question(text: str) -> bool:
+    """True if the LLM response ends with a question mark and is waiting on the
+    user. Viz fallbacks must skip in this case so the viz frame stays empty
+    until the user picks map/chart/data.
+    """
+    return bool(text) and text.rstrip().endswith("?")
+
 
 def _validate_viz_species_consistency(response_text: str) -> None:
     """Cross-check the LLM response against what is actually in VizBuffer.
@@ -655,7 +674,13 @@ def run_agent(user_input: str, history: list[dict] | None = None) -> str:
     # Post-invoke fallback: if the user asked for a map/chart but the LLM
     # didn't call the viz tool, auto-invoke it with cached observation data.
     # Mirrors the post-stream fallback in stream_agent().
-    if VizBuffer["type"] is None and response_text:
+    # Skip when the LLM ended on a clarifying question — we must not render a
+    # default viz while the user is still being asked which output they want.
+    if (
+        VizBuffer["type"] is None
+        and response_text
+        and not _is_clarifying_question(response_text)
+    ):
         _obs_file = get_last_obs_file()
         _obs_data = get_last_observations()
         if _obs_file or _obs_data:
@@ -847,7 +872,9 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
                         logger.info("LLM response: %s", content[:500])
                         # Detect when the LLM hallucinates a viz tool return value
                         # instead of invoking the tool.  Auto-invoke with cached data.
-                        if VizBuffer["type"] is None:
+                        # Skip when the LLM is asking a clarifying question — we
+                        # must not render a default viz while waiting for reply.
+                        if VizBuffer["type"] is None and not _is_clarifying_question(stripped):
                             cached = get_last_observations()
                             if cached:
                                 _fake_tool: str | None = None
@@ -929,7 +956,13 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
     # Post-stream fallback: LLM claimed to create a visualization in natural
     # language but the inline fallback missed the phrasing and VizBuffer is
     # still empty.  Re-check against the final response and the user's intent.
-    if VizBuffer["type"] is None and _last_final_content:
+    # Skip when the LLM ended on a clarifying question — we must not render a
+    # default viz while the user is still being asked which output they want.
+    if (
+        VizBuffer["type"] is None
+        and _last_final_content
+        and not _is_clarifying_question(_last_final_content)
+    ):
         _obs_file = get_last_obs_file()
         _obs_data = get_last_observations()
         if _obs_file or _obs_data:
