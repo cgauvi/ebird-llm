@@ -176,11 +176,15 @@ data "aws_iam_policy_document" "github_oidc_assume" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      # Allow master, main, and develop branches
+      # Branch refs cover the plan job (no environment). Environment subs are
+      # required for the apply job, which routes through a GitHub Environment
+      # and therefore presents an OIDC token with sub=environment:<name>.
       values = [
         "repo:${var.github_repo}:ref:refs/heads/master",
         "repo:${var.github_repo}:ref:refs/heads/main",
         "repo:${var.github_repo}:ref:refs/heads/develop",
+        "repo:${var.github_repo}:environment:terraform-apply",
+        "repo:${var.github_repo}:environment:terraform-apply-dev",
       ]
     }
   }
