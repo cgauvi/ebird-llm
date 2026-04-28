@@ -1,4 +1,9 @@
 # Usage:
+#   # one-time, before any per-env apply:
+#   make init-shared
+#   make plan-shared
+#   make apply-shared
+#
 #   make init ENV=dev
 #   make plan ENV=dev
 #   make apply ENV=dev
@@ -16,17 +21,39 @@ ECR_REPO    = $(ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/ebird-llm-$(ENV)
 IMAGE_TAG  ?= $(shell git rev-parse --short HEAD)
 
 TF          = terraform -chdir=infra
+TF_SHARED   = terraform -chdir=infra/shared
 
 TF_BACKEND  = -backend-config="bucket=$(BUCKET)" \
               -backend-config="key=ebird-llm/$(ENV)/terraform.tfstate" \
               -backend-config="dynamodb_table=ebird-llm-tf-locks" \
               -backend-config="encrypt=true"
 
+TF_BACKEND_SHARED = -backend-config="bucket=$(BUCKET)" \
+                    -backend-config="key=ebird-llm/shared/terraform.tfstate" \
+                    -backend-config="dynamodb_table=ebird-llm-tf-locks" \
+                    -backend-config="encrypt=true"
+
 TF_VARS     = -var-file="$(ENV).tfvars" \
               -var "certificate_arn=$(CERTIFICATE_ARN)" \
               -var "image_tag=$(IMAGE_TAG)"
 
-.PHONY: init plan apply
+TF_VARS_SHARED = -var "certificate_arn=$(CERTIFICATE_ARN)"
+
+.PHONY: init plan apply init-shared plan-shared apply-shared destroy-shared
+
+init-shared:
+	$(TF_SHARED) init -reconfigure $(TF_BACKEND_SHARED)
+
+plan-shared: init-shared
+	$(TF_SHARED) plan $(TF_VARS_SHARED) -out=tfplan
+
+apply-shared:
+	$(TF_SHARED) apply tfplan && rm -f infra/shared/tfplan
+
+# Destroy must run AFTER both per-env stacks have been destroyed, since their
+# remote_state references will fail without the shared outputs.
+destroy-shared:
+	$(TF_SHARED) destroy $(TF_VARS_SHARED)
 
 init:
 	$(TF) init -reconfigure $(TF_BACKEND)
