@@ -212,6 +212,20 @@ with st.sidebar:
 
     st.divider()
 
+    if not IS_DEV and st.session_state.get("user_email"):
+        try:
+            from src.utils.usage_tracker import get_usage, MAX_LLM_CALLS_PER_MONTH
+            _used = get_usage(st.session_state.user_email)["llm_call_count"]
+            _remaining = max(0, MAX_LLM_CALLS_PER_MONTH - _used)
+            st.metric(
+                "Requests remaining this month",
+                f"{_remaining} / {MAX_LLM_CALLS_PER_MONTH}",
+            )
+            st.progress(min(_used / MAX_LLM_CALLS_PER_MONTH, 1.0))
+        except Exception:
+            pass
+        st.divider()
+
     if IS_DEV:
         show_logs = st.checkbox("🪵 Show log pane", value=False)
 
