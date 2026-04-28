@@ -114,66 +114,71 @@ class TestAuth:
 class TestUsageTracker:
     """Tests for src.utils.usage_tracker module."""
 
+    @pytest.fixture(autouse=True)
+    def _set_prod_env(self, monkeypatch):
+        # Rate limiting only applies in prod; tests must opt in.
+        monkeypatch.setenv("APP_ENV", "prod")
+
     @patch("src.utils.usage_tracker._usage_table")
     def test_get_usage_returns_defaults_when_no_item(self, mock_table):
         mock_table.return_value.get_item.return_value = {}
 
         from src.utils.usage_tracker import get_usage
         result = get_usage("alice@example.com")
-        assert result == {"session_count": 0, "prompt_count": 0}
+        assert result == {"llm_call_count": 0}
 
     @patch("src.utils.usage_tracker._usage_table")
     def test_get_usage_returns_existing_counts(self, mock_table):
         mock_table.return_value.get_item.return_value = {
-            "Item": {"session_count": 5, "prompt_count": 20}
+            "Item": {"llm_call_count": 25}
         }
 
         from src.utils.usage_tracker import get_usage
         result = get_usage("alice@example.com")
-        assert result == {"session_count": 5, "prompt_count": 20}
+        assert result == {"llm_call_count": 25}
 
     @patch("src.utils.usage_tracker._usage_table")
-    def test_increment_session_allowed(self, mock_table):
+    def test_increment_llm_call_allowed(self, mock_table):
         mock_table.return_value.update_item.return_value = {
-            "Attributes": {"session_count": 3, "prompt_count": 10}
+            "Attributes": {"llm_call_count": 12}
         }
 
-        from src.utils.usage_tracker import increment_session
-        result = increment_session("alice@example.com")
+        from src.utils.usage_tracker import increment_llm_call
+        result = increment_llm_call("alice@example.com")
         assert result["allowed"] is True
-        assert result["session_count"] == 3
+        assert result["llm_call_count"] == 12
+        assert result["limit"] == 40
 
     @patch("src.utils.usage_tracker._usage_table")
-    def test_increment_session_denied_at_limit(self, mock_table):
+    def test_increment_llm_call_at_cap_still_allowed(self, mock_table):
         mock_table.return_value.update_item.return_value = {
-            "Attributes": {"session_count": 11, "prompt_count": 5}
+            "Attributes": {"llm_call_count": 40}
         }
 
-        from src.utils.usage_tracker import increment_session
-        result = increment_session("alice@example.com")
-        assert result["allowed"] is False
-        assert result["session_count"] == 11
-
-    @patch("src.utils.usage_tracker._usage_table")
-    def test_increment_prompt_allowed(self, mock_table):
-        mock_table.return_value.update_item.return_value = {
-            "Attributes": {"prompt_count": 15, "session_count": 2}
-        }
-
-        from src.utils.usage_tracker import increment_prompt
-        result = increment_prompt("alice@example.com")
+        from src.utils.usage_tracker import increment_llm_call
+        result = increment_llm_call("alice@example.com")
         assert result["allowed"] is True
-        assert result["prompt_count"] == 15
+        assert result["llm_call_count"] == 40
 
     @patch("src.utils.usage_tracker._usage_table")
-    def test_increment_prompt_denied_at_limit(self, mock_table):
+    def test_increment_llm_call_denied_over_limit(self, mock_table):
         mock_table.return_value.update_item.return_value = {
-            "Attributes": {"prompt_count": 31, "session_count": 2}
+            "Attributes": {"llm_call_count": 41}
         }
 
-        from src.utils.usage_tracker import increment_prompt
-        result = increment_prompt("alice@example.com")
+        from src.utils.usage_tracker import increment_llm_call
+        result = increment_llm_call("alice@example.com")
         assert result["allowed"] is False
+        assert result["llm_call_count"] == 41
+
+    @patch("src.utils.usage_tracker._usage_table")
+    def test_increment_llm_call_skips_dynamo_in_dev(self, mock_table, monkeypatch):
+        monkeypatch.setenv("APP_ENV", "dev")
+
+        from src.utils.usage_tracker import increment_llm_call
+        result = increment_llm_call("alice@example.com")
+        assert result["allowed"] is True
+        mock_table.return_value.update_item.assert_not_called()
 
     @patch("src.utils.usage_tracker._calls_table")
     def test_log_llm_call_writes_item(self, mock_table):

@@ -289,8 +289,7 @@ Click **New Conversation** in the sidebar to reset chat history and memory.
 | `COGNITO_CLIENT_ID` | No* | Cognito App Client ID |
 | `DYNAMODB_TABLE_PREFIX` | No* | DynamoDB table name prefix (default: `ebird-llm-dev`) |
 | `AWS_REGION` | No | AWS region for Cognito + DynamoDB (default: `us-east-2`) |
-| `MAX_SESSIONS_PER_MONTH` | No | Session limit per user per month (default: `10`) |
-| `MAX_PROMPTS_PER_MONTH` | No | Prompt limit per user per month (default: `30`) |
+| `MAX_LLM_CALLS_PER_MONTH` | No | LLM-call limit per user per month (default: `40`) |
 
 \* Authentication is optional. When `COGNITO_USER_POOL_ID` and `COGNITO_CLIENT_ID`
 are unset the app runs without login (useful for local development). Set them to

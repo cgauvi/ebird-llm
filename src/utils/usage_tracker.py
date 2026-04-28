@@ -4,12 +4,11 @@ usage_tracker.py — DynamoDB-backed usage tracking and rate limiting.
 Two tables (names derived from ``DYNAMODB_TABLE_PREFIX`` env-var, defaulting
 to the ``{project}-{env}`` naming used by Terraform):
 
-1. ``{prefix}-usage``      — monthly session & prompt counters per user.
+1. ``{prefix}-usage``      — monthly LLM-call counter per user.
 2. ``{prefix}-llm-calls``  — per-call audit log for analytics.
 
-Rate limits (configurable via env-vars):
-    MAX_SESSIONS_PER_MONTH  – default 10
-    MAX_PROMPTS_PER_MONTH   – default 30
+Rate limit (configurable via env-var):
+    MAX_LLM_CALLS_PER_MONTH – default 40
 
 All writes use conditional expressions / atomic increments so concurrent
 requests from the same user are safe.
@@ -31,8 +30,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-MAX_SESSIONS_PER_MONTH = int(os.getenv("MAX_SESSIONS_PER_MONTH", "10"))
-MAX_PROMPTS_PER_MONTH = int(os.getenv("MAX_PROMPTS_PER_MONTH", "30"))
+MAX_LLM_CALLS_PER_MONTH = int(os.getenv("MAX_LLM_CALLS_PER_MONTH", "40"))
 
 _TABLE_PREFIX = os.getenv("DYNAMODB_TABLE_PREFIX", "ebird-llm-dev")
 
@@ -74,7 +72,7 @@ def _current_month() -> str:
 def get_usage(user_id: str, month: str | None = None) -> dict:
     """Return current month's usage for *user_id*.
 
-    Returns ``{"session_count": int, "prompt_count": int}``.
+    Returns ``{"llm_call_count": int}``.
     """
     month = month or _current_month()
     try:
@@ -82,62 +80,45 @@ def get_usage(user_id: str, month: str | None = None) -> dict:
             Key={"user_id": user_id, "month": month},
         )
         item = resp.get("Item", {})
-        return {
-            "session_count": int(item.get("session_count", 0)),
-            "prompt_count": int(item.get("prompt_count", 0)),
-        }
+        return {"llm_call_count": int(item.get("llm_call_count", 0))}
     except ClientError:
         logger.exception("get_usage failed for %s", user_id)
-        return {"session_count": 0, "prompt_count": 0}
+        return {"llm_call_count": 0}
 
 
-def increment_session(user_id: str) -> dict:
-    """Atomically increment ``session_count`` for the current month.
+def increment_llm_call(user_id: str) -> dict:
+    """Atomically increment ``llm_call_count`` for the current month and
+    return whether the user is still within the monthly cap.
 
-    Returns ``{"allowed": bool, "session_count": int, "limit": int}``.
+    No-op in non-prod environments (``APP_ENV != "prod"``) — returns
+    ``allowed=True`` without touching DynamoDB so local development is
+    not rate-limited.
+
+    Returns ``{"allowed": bool, "llm_call_count": int, "limit": int}``.
     """
+    if os.getenv("APP_ENV", "dev").lower() != "prod":
+        return {"allowed": True, "llm_call_count": 0, "limit": MAX_LLM_CALLS_PER_MONTH}
+
     month = _current_month()
     try:
         resp = _usage_table().update_item(
             Key={"user_id": user_id, "month": month},
-            UpdateExpression="SET session_count = if_not_exists(session_count, :zero) + :one, "
-                             "prompt_count = if_not_exists(prompt_count, :zero)",
+            UpdateExpression="SET llm_call_count = if_not_exists(llm_call_count, :zero) + :one",
             ExpressionAttributeValues={":zero": 0, ":one": 1},
             ReturnValues="ALL_NEW",
         )
-        count = int(resp["Attributes"]["session_count"])
-        allowed = count <= MAX_SESSIONS_PER_MONTH
+        count = int(resp["Attributes"]["llm_call_count"])
+        allowed = count <= MAX_LLM_CALLS_PER_MONTH
         if not allowed:
-            logger.warning("Session limit reached for %s: %d/%d", user_id, count, MAX_SESSIONS_PER_MONTH)
-        return {"allowed": allowed, "session_count": count, "limit": MAX_SESSIONS_PER_MONTH}
+            logger.warning(
+                "LLM call limit reached for %s: %d/%d",
+                user_id, count, MAX_LLM_CALLS_PER_MONTH,
+            )
+        return {"allowed": allowed, "llm_call_count": count, "limit": MAX_LLM_CALLS_PER_MONTH}
     except ClientError:
-        logger.exception("increment_session failed for %s", user_id)
-        # Fail open — allow the session but log the error
-        return {"allowed": True, "session_count": -1, "limit": MAX_SESSIONS_PER_MONTH}
-
-
-def increment_prompt(user_id: str) -> dict:
-    """Atomically increment ``prompt_count`` for the current month.
-
-    Returns ``{"allowed": bool, "prompt_count": int, "limit": int}``.
-    """
-    month = _current_month()
-    try:
-        resp = _usage_table().update_item(
-            Key={"user_id": user_id, "month": month},
-            UpdateExpression="SET prompt_count = if_not_exists(prompt_count, :zero) + :one, "
-                             "session_count = if_not_exists(session_count, :zero)",
-            ExpressionAttributeValues={":zero": 0, ":one": 1},
-            ReturnValues="ALL_NEW",
-        )
-        count = int(resp["Attributes"]["prompt_count"])
-        allowed = count <= MAX_PROMPTS_PER_MONTH
-        if not allowed:
-            logger.warning("Prompt limit reached for %s: %d/%d", user_id, count, MAX_PROMPTS_PER_MONTH)
-        return {"allowed": allowed, "prompt_count": count, "limit": MAX_PROMPTS_PER_MONTH}
-    except ClientError:
-        logger.exception("increment_prompt failed for %s", user_id)
-        return {"allowed": True, "prompt_count": -1, "limit": MAX_PROMPTS_PER_MONTH}
+        logger.exception("increment_llm_call failed for %s", user_id)
+        # Fail open — don't block users on infra outages
+        return {"allowed": True, "llm_call_count": -1, "limit": MAX_LLM_CALLS_PER_MONTH}
 
 
 # ---------------------------------------------------------------------------
