@@ -11,7 +11,7 @@ on:
 
 # Only one operation against the shared stack at a time, regardless of branch.
 concurrency:
-  group: terraform-shared
+  group: terraform-apply
   cancel-in-progress: false
 
 jobs:
