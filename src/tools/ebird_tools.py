@@ -28,6 +28,9 @@ from src.utils.state import (
     set_obs_dataframe,
     set_known_species,
     set_last_search_params,
+    append_obs_history,
+    get_last_search_params,
+    region_label_from_params,
 )
 from src.utils.summarizer import SUMMARIES_DIR
 
@@ -52,6 +55,11 @@ def _return_obs(records: list, note: str | None = None) -> str:
     df = pd.DataFrame(records) if records else pd.DataFrame()
     set_obs_dataframe(df)
     set_known_species(records)
+
+    # Append this fetch to the per-region history so the chart tool can build
+    # multi-region comparisons. Relies on set_last_search_params having been
+    # called immediately before _return_obs by the caller tool.
+    append_obs_history(records, region_label_from_params(get_last_search_params()))
 
     # Save observations to a uniquely named JSON file
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)

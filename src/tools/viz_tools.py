@@ -18,7 +18,13 @@ import plotly.express as px
 from langchain.tools import tool
 from langchain_core.tools import ToolException
 
-from src.utils.state import VizBuffer, get_last_observations, get_last_obs_file, get_obs_dataframe
+from src.utils.state import (
+    VizBuffer,
+    get_last_observations,
+    get_last_obs_file,
+    get_obs_dataframe,
+    get_obs_history,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +233,7 @@ def create_historical_chart(
     observations_json: str = "",
     chart_type: Literal["bar", "line", "scatter", "heatmap", "facet_bar", "box"] = "bar",
     top_n_species: int = 15,
+    compare_regions: bool = False,
 ) -> str:
     """Build a chart showing the number of observations per species.
 
@@ -247,12 +254,33 @@ def create_historical_chart(
                             requires 'locName').
             - 'box'       — box plot showing the count distribution per species.
         top_n_species: Show only the top N most-observed species (default 15).
+        compare_regions: When True (only effective for 'line' and 'bar'), pull
+            observations from every region fetched in this session and overlay
+            them on a single figure. Species are distinguished by colour and
+            regions by line-dash ('line') or pattern ('bar'), each with its own
+            legend. Use this when the user asks to compare regions or sites.
 
     Returns:
         A short confirmation string, e.g. "Chart created with 120 records."
         The chart is rendered in the Streamlit right panel automatically.
     """
-    records = parse_observations_json(observations_json) if observations_json.strip() else _load_from_cache()
+    multi_region = False
+    if compare_regions and chart_type in ("line", "bar") and not observations_json.strip():
+        history = get_obs_history()
+        region_labels = [e["region"] for e in history if e.get("records")]
+        if len(region_labels) >= 2:
+            tagged: list[dict] = []
+            for entry in history:
+                for rec in entry["records"]:
+                    rec = dict(rec)
+                    rec["_region"] = entry["region"]
+                    tagged.append(rec)
+            records = tagged
+            multi_region = True
+        else:
+            records = parse_observations_json(observations_json) if observations_json.strip() else _load_from_cache()
+    else:
+        records = parse_observations_json(observations_json) if observations_json.strip() else _load_from_cache()
     if not records:
         raise ToolException("The observations list is empty — nothing to chart.")
 
@@ -280,29 +308,64 @@ def create_historical_chart(
         return base_multi
 
     if chart_type == "bar":
-        summary = (
-            df.groupby("comName", as_index=False)["howMany"]
-            .sum()
-            .sort_values("howMany", ascending=False)
-            .head(top_n_species)
-        )
-        fig = px.bar(
-            summary,
-            x="comName",
-            y="howMany",
-            title=_species_qualifier(
-                f"Top {top_n_species} Species by Observation Count",
-                f"{sole_species} — Observation Count",
-            ),
-            labels={"comName": "Species", "howMany": "Count"},
-            color="comName",
-            color_discrete_sequence=px.colors.qualitative.Set2,
-        )
-        fig.update_layout(
-            xaxis_tickangle=-40,
-            showlegend=False,
-            margin={"t": 50, "b": 120},
-        )
+        if multi_region and "obsDt" in df.columns:
+            df["date"] = pd.to_datetime(df["obsDt"], format="mixed").dt.normalize()
+            top_species = (
+                df.groupby("comName")["howMany"].sum()
+                .nlargest(top_n_species).index.tolist()
+            )
+            bar_df = df[df["comName"].isin(top_species)]
+            summary = bar_df.groupby(
+                ["date", "comName", "_region"], as_index=False
+            )["howMany"].sum()
+            n_regions = summary["_region"].nunique()
+            fig = px.bar(
+                summary,
+                x="date",
+                y="howMany",
+                color="comName",
+                pattern_shape="_region",
+                barmode="group",
+                title=(
+                    f"Observations Over Time — Comparing {n_regions} Regions "
+                    f"(top {top_n_species} species)"
+                ),
+                labels={
+                    "date": "Date",
+                    "howMany": "Count",
+                    "comName": "Species",
+                    "_region": "Region",
+                },
+                color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig.update_layout(
+                margin={"t": 50, "b": 80},
+                legend={"title": "Species / Region"},
+            )
+        else:
+            summary = (
+                df.groupby("comName", as_index=False)["howMany"]
+                .sum()
+                .sort_values("howMany", ascending=False)
+                .head(top_n_species)
+            )
+            fig = px.bar(
+                summary,
+                x="comName",
+                y="howMany",
+                title=_species_qualifier(
+                    f"Top {top_n_species} Species by Observation Count",
+                    f"{sole_species} — Observation Count",
+                ),
+                labels={"comName": "Species", "howMany": "Count"},
+                color="comName",
+                color_discrete_sequence=px.colors.qualitative.Set2,
+            )
+            fig.update_layout(
+                xaxis_tickangle=-40,
+                showlegend=False,
+                margin={"t": 50, "b": 120},
+            )
 
     elif chart_type == "line":
         if "obsDt" not in df.columns:
@@ -311,8 +374,9 @@ def create_historical_chart(
                 "for a time-series chart. Try chart_type='bar' instead."
             )
         df["date"] = pd.to_datetime(df["obsDt"], format="mixed").dt.normalize()
+        group_cols = ["date", "comName"] + (["_region"] if multi_region else [])
         time_summary = (
-            df.groupby(["date", "comName"], as_index=False)["howMany"].sum()
+            df.groupby(group_cols, as_index=False)["howMany"].sum()
         )
         top_species = (
             df.groupby("comName")["howMany"]
@@ -321,19 +385,35 @@ def create_historical_chart(
             .index.tolist()
         )
         time_summary = time_summary[time_summary["comName"].isin(top_species)]
-        fig = px.line(
-            time_summary,
+        line_kwargs = dict(
             x="date",
             y="howMany",
             color="comName",
-            title=_species_qualifier(
-                f"Observations Over Time (top {top_n_species} species)",
-                f"{sole_species} — Observations Over Time",
-            ),
-            labels={"date": "Date", "howMany": "Count", "comName": "Species"},
+            labels={
+                "date": "Date",
+                "howMany": "Count",
+                "comName": "Species",
+                "_region": "Region",
+            },
             markers=True,
         )
-        fig.update_layout(margin={"t": 50, "b": 60})
+        if multi_region:
+            n_regions = time_summary["_region"].nunique()
+            line_kwargs["line_dash"] = "_region"
+            line_kwargs["title"] = (
+                f"Observations Over Time — Comparing {n_regions} Regions "
+                f"(top {top_n_species} species)"
+            )
+        else:
+            line_kwargs["title"] = _species_qualifier(
+                f"Observations Over Time (top {top_n_species} species)",
+                f"{sole_species} — Observations Over Time",
+            )
+        fig = px.line(time_summary, **line_kwargs)
+        fig.update_layout(
+            margin={"t": 50, "b": 60},
+            legend={"title": "Species / Region" if multi_region else "Species"},
+        )
 
     elif chart_type == "scatter":
         if "obsDt" not in df.columns:
