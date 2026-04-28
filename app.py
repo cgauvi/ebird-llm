@@ -16,6 +16,8 @@ from src.utils.logging_config import (
 
 setup_logging()
 
+IS_DEV = os.getenv("APP_ENV", "dev").lower() == "dev"
+
 st.set_page_config(
     page_title="eBird Birding Assistant",
     page_icon="🐦",
@@ -84,9 +86,119 @@ def _render_log_into(container, all_entries, threshold):
     container.markdown(html, unsafe_allow_html=True)
 
 
+
+log_area = None      # set inside sidebar when show_logs is active
+_log_threshold = 1   # default: INFO
+
+# ---------------------------------------------------------------------------
+# Session state initialisation
+# ---------------------------------------------------------------------------
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.user_email = None
+    st.session_state.session_id = None
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []  # list[dict(role, content)]
+
+if "show_logs" not in st.session_state:
+    st.session_state.show_logs = False
+
+if "log_entries" not in st.session_state:
+    st.session_state.log_entries = []  # list[dict] — persists across reruns
+
+if "viz_snapshot" not in st.session_state:
+    # Snapshot of VizBuffer captured after each agent turn so the right panel
+    # persists across re-runs triggered by subsequent chat inputs.
+    st.session_state.viz_snapshot = {"type": None, "data": None, "title": None, "table": None}
+    from src.config import DEFAULT_MODEL_ALIAS
+    os.environ.setdefault("HF_MODEL_ID", DEFAULT_MODEL_ALIAS)
+
+# ---------------------------------------------------------------------------
+# Authentication gate
+# ---------------------------------------------------------------------------
+
+from src.utils.auth import is_configured as auth_configured  # noqa: E402
+
+if auth_configured() and not st.session_state.authenticated:
+    from src.utils import auth  # noqa: E402
+
+    st.title("🐦 eBird Birding Assistant")
+    login_tab, signup_tab, confirm_tab = st.tabs(["Sign In", "Sign Up", "Verify Email"])
+
+    with login_tab:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign In", use_container_width=True)
+            if submitted and email and password:
+                result = auth.sign_in(email, password)
+                if result["success"]:
+                    st.session_state.authenticated = True
+                    st.session_state.user_email = result["email"]
+                    st.session_state.session_id = str(uuid.uuid4())
+                    # Track session start
+                    try:
+                        from src.utils.usage_tracker import increment_session
+                        increment_session(result["email"])
+                    except Exception:
+                        pass
+                    st.rerun()
+                else:
+                    st.error(result["error"])
+
+    with signup_tab:
+        with st.form("signup_form"):
+            new_email = st.text_input("Email", key="signup_email")
+            new_password = st.text_input("Password", type="password", key="signup_pw")
+            st.caption("Min 8 chars, uppercase, lowercase, number, and symbol required.")
+            signed_up = st.form_submit_button("Create Account", use_container_width=True)
+            if signed_up and new_email and new_password:
+                result = auth.sign_up(new_email, new_password)
+                if result["success"]:
+                    st.success("Account created! Check your email for a verification code.")
+                else:
+                    st.error(result["error"])
+
+    with confirm_tab:
+        with st.form("confirm_form"):
+            conf_email = st.text_input("Email", key="conf_email")
+            conf_code = st.text_input("Verification Code")
+            confirmed = st.form_submit_button("Verify", use_container_width=True)
+            if confirmed and conf_email and conf_code:
+                result = auth.confirm_sign_up(conf_email, conf_code)
+                if result["success"]:
+                    st.success("Email verified! You can now sign in.")
+                else:
+                    st.error(result["error"])
+        if st.button("Resend code", key="btn_resend"):
+            if conf_email:
+                auth.resend_confirmation_code(conf_email)
+                st.info("Verification code re-sent.")
+
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+def _git_version() -> str:
+    """Return the current git tag or short commit hash, e.g. 'v1.2.3' or 'a1b2c3d'."""
+    import subprocess
+    try:
+        return subprocess.check_output(
+            ["git", "describe", "--tags", "--always"],
+            stderr=subprocess.DEVNULL,
+            cwd=os.path.dirname(__file__) or ".",
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
 with st.sidebar:
     st.title("🐦 eBird Assistant")
-    st.caption("Powered by LangChain · HuggingFace · eBird API v2")
+    st.caption(f"Powered by LangChain · HuggingFace · eBird API v2 · `{_git_version()}`")
 
     st.divider()
 
@@ -103,30 +215,31 @@ with st.sidebar:
 
     st.divider()
 
-    show_logs = st.checkbox("🪵 Show log pane", value=False)
+    if IS_DEV:
+        show_logs = st.checkbox("🪵 Show log pane", value=False)
 
-    if show_logs:
-        level_options = ["DEBUG", "INFO", "WARNING", "ERROR"]
-        selected_level = st.selectbox(
-            "Min level",
-            options=level_options,
-            index=1,
-        )
+        if show_logs:
+            level_options = ["DEBUG", "INFO", "WARNING", "ERROR"]
+            selected_level = st.selectbox(
+                "Min level",
+                options=level_options,
+                index=1,
+            )
 
-        if st.button("🗑️ Clear logs", use_container_width=True):
-            clear_log_buffer()
-            st.session_state.log_entries = []
-            st.rerun()
+            if st.button("🗑️ Clear logs", use_container_width=True):
+                clear_log_buffer()
+                st.session_state.log_entries = []
+                st.rerun()
 
-        threshold = _LOG_LEVEL_ORDER.get(selected_level, 0)
-        log_display = st.empty()
-        _render_log_into(
-            log_display,
-            st.session_state.log_entries,
-            threshold,
-        )
+            threshold = _LOG_LEVEL_ORDER.get(selected_level, 0)
+            log_display = st.empty()
+            _render_log_into(
+                log_display,
+                st.session_state.log_entries,
+                threshold,
+            )
 
-    st.divider()
+        st.divider()
 
     st.markdown(
         """
@@ -269,6 +382,9 @@ with chat_col:
         # -------------------------------------------------------------
 
         _state.clear_viz_buffer()
+        # Bump the turn counter so leftover obs caches from prior turns are
+        # treated as stale by the viz tools' fallback loader.
+        _state.start_new_turn()
 
         st.session_state.viz_snapshot = {
             "type": None,
