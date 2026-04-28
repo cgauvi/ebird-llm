@@ -34,6 +34,37 @@ def clear_viz_buffer() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Turn tracking — lets viz tools detect when their cache fallback would
+# silently render data fetched in a prior user turn.
+# ---------------------------------------------------------------------------
+
+_current_turn_id: int = 0
+_obs_cache_turn_id: int = -1  # -1 = no eBird fetch has happened yet
+
+
+def start_new_turn() -> int:
+    """Bump the turn counter. Caches written before this point are now stale.
+
+    Called by app.py at the start of every user turn so that viz tools can
+    detect when the LLM is about to render data left over from a previous turn.
+    """
+    global _current_turn_id
+    _current_turn_id += 1
+    return _current_turn_id
+
+
+def mark_obs_cache_current() -> None:
+    """Tag the obs cache as written during the current turn."""
+    global _obs_cache_turn_id
+    _obs_cache_turn_id = _current_turn_id
+
+
+def obs_cache_is_current_turn() -> bool:
+    """True when the obs cache was populated during the current turn."""
+    return _obs_cache_turn_id == _current_turn_id
+
+
+# ---------------------------------------------------------------------------
 # Last-observations cache — stores the most recent eBird observation JSON so
 # viz tools can recover when the LLM passes a malformed/truncated string.
 # ---------------------------------------------------------------------------

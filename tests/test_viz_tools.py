@@ -47,10 +47,23 @@ SAMPLE_OBS = [
 
 @pytest.fixture(autouse=True)
 def reset_viz_buffer():
-    """Clear VizBuffer before and after every test."""
-    clear_viz_buffer()
+    """Clear VizBuffer and turn-tracking state before and after every test."""
+    from src.utils import state
+
+    def _reset():
+        clear_viz_buffer()
+        state._current_turn_id = 0
+        state._obs_cache_turn_id = -1
+        state._obs_dataframe = None
+        state._last_observations_json = None
+        state._last_obs_file = None
+        state._known_species = []
+        state._last_search_params = None
+        state._obs_history = []
+
+    _reset()
     yield
-    clear_viz_buffer()
+    _reset()
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +310,131 @@ class TestCreateHistoricalChart:
             f"Expected 2 data points for Canada Goose (one per day), got {len(x_values)}: {x_values}"
         )
 
+    # Two species observed on overlapping but distinct days. The line chart
+    # must produce one trace per species, each with the correct date/count pairs.
+    _BALD_AND_GOLDEN_EAGLE_OVER_TIME = [
+        {
+            "comName": "Bald Eagle",
+            "sciName": "Haliaeetus leucocephalus",
+            "speciesCode": "baleag",
+            "howMany": 2,
+            "lat": 46.81, "lng": -71.21,
+            "obsDt": "2026-04-01 08:00",
+            "locName": "Site A", "locId": "L1",
+        },
+        {
+            "comName": "Bald Eagle",
+            "sciName": "Haliaeetus leucocephalus",
+            "speciesCode": "baleag",
+            "howMany": 3,
+            "lat": 46.81, "lng": -71.21,
+            "obsDt": "2026-04-05 08:00",
+            "locName": "Site A", "locId": "L1",
+        },
+        {
+            "comName": "Bald Eagle",
+            "sciName": "Haliaeetus leucocephalus",
+            "speciesCode": "baleag",
+            "howMany": 1,
+            "lat": 46.81, "lng": -71.21,
+            "obsDt": "2026-04-10 08:00",
+            "locName": "Site A", "locId": "L1",
+        },
+        {
+            "comName": "Golden Eagle",
+            "sciName": "Aquila chrysaetos",
+            "speciesCode": "goleag",
+            "howMany": 1,
+            "lat": 46.83, "lng": -71.23,
+            "obsDt": "2026-04-02 10:00",
+            "locName": "Site C", "locId": "L3",
+        },
+        {
+            "comName": "Golden Eagle",
+            "sciName": "Aquila chrysaetos",
+            "speciesCode": "goleag",
+            "howMany": 2,
+            "lat": 46.83, "lng": -71.23,
+            "obsDt": "2026-04-08 10:00",
+            "locName": "Site C", "locId": "L3",
+        },
+        {
+            "comName": "Golden Eagle",
+            "sciName": "Aquila chrysaetos",
+            "speciesCode": "goleag",
+            "howMany": 1,
+            "lat": 46.83, "lng": -71.23,
+            "obsDt": "2026-04-12 10:00",
+            "locName": "Site C", "locId": "L3",
+        },
+    ]
+
+    @staticmethod
+    def _decode_y(y_raw):
+        """Plotly may store y-values as a base64-encoded numpy buffer."""
+        import base64
+        import numpy as np
+        if isinstance(y_raw, dict) and "bdata" in y_raw:
+            return np.frombuffer(
+                base64.b64decode(y_raw["bdata"]), dtype=np.dtype(y_raw["dtype"])
+            ).tolist()
+        return list(y_raw)
+
+    def test_line_chart_two_species_over_time_yields_two_traces(self):
+        """Bald + Golden Eagle over time must produce one trace per species,
+        each with its own date/count series. Regression for the bug where the
+        line chart silently dropped one species when multiple were present."""
+        create_historical_chart.invoke(
+            {
+                "observations_json": json.dumps(self._BALD_AND_GOLDEN_EAGLE_OVER_TIME),
+                "chart_type": "line",
+            }
+        )
+        fig_dict = VizBuffer["data"]
+        traces = fig_dict["data"]
+        names_by_trace = {str(t.get("name", "")): t for t in traces}
+        assert "Bald Eagle" in names_by_trace, (
+            f"No Bald Eagle trace in line chart; got traces: {list(names_by_trace)}"
+        )
+        assert "Golden Eagle" in names_by_trace, (
+            f"No Golden Eagle trace in line chart; got traces: {list(names_by_trace)}"
+        )
+
+        bald_x = list(names_by_trace["Bald Eagle"]["x"])
+        bald_y = self._decode_y(names_by_trace["Bald Eagle"]["y"])
+        assert len(bald_x) == 3, f"Bald Eagle should have 3 dates, got {bald_x}"
+        assert bald_y == [2, 3, 1], f"Bald Eagle counts wrong: {bald_y}"
+
+        golden_x = list(names_by_trace["Golden Eagle"]["x"])
+        golden_y = self._decode_y(names_by_trace["Golden Eagle"]["y"])
+        assert len(golden_x) == 3, f"Golden Eagle should have 3 dates, got {golden_x}"
+        assert golden_y == [1, 2, 1], f"Golden Eagle counts wrong: {golden_y}"
+
+    def test_line_chart_two_species_filter_subsets_traces(self):
+        """species_filter on a line chart must keep one trace per requested species."""
+        mixed = self._BALD_AND_GOLDEN_EAGLE_OVER_TIME + [
+            {
+                "comName": "American Robin",
+                "speciesCode": "amerob",
+                "howMany": 5,
+                "obsDt": "2026-04-03 09:00",
+                "lat": 46.8, "lng": -71.2,
+                "locName": "Park", "locId": "L4",
+            },
+        ]
+        create_historical_chart.invoke(
+            {
+                "observations_json": json.dumps(mixed),
+                "chart_type": "line",
+                "species_filter": ["Bald Eagle", "Golden Eagle"],
+            }
+        )
+        fig_dict = VizBuffer["data"]
+        names = {str(t.get("name", "")) for t in fig_dict["data"]}
+        assert names == {"Bald Eagle", "Golden Eagle"}, (
+            f"Expected exactly Bald + Golden Eagle traces, got {names}"
+        )
+
     def test_line_chart_same_day_different_times_aggregated(self):
         """Two Canada Goose observations on the same day at different times must collapse to 1 point."""
         same_day_obs = [
@@ -395,9 +533,12 @@ class TestShowObservationsTable:
 
     def test_uses_session_cache_when_json_empty(self):
         """Calling with no observations_json must fall back to the session cache."""
-        from src.utils.state import set_obs_dataframe
+        from src.utils.state import set_obs_dataframe, mark_obs_cache_current
         import pandas as pd
         set_obs_dataframe(pd.DataFrame(SAMPLE_OBS))
+        # Simulate an eBird tool having populated the cache during this turn so
+        # the viz-tool turn guard does not reject the fallback.
+        mark_obs_cache_current()
         show_observations_table.invoke({})
         assert VizBuffer["type"] == "dataframe"
         assert len(VizBuffer["data"]) == len(SAMPLE_OBS)
@@ -485,3 +626,397 @@ class TestParseObsCleaning:
     def test_raises_on_non_list(self):
         with pytest.raises(ToolException, match="JSON array"):
             parse_observations_json(json.dumps({"key": "value"}))
+
+
+# ---------------------------------------------------------------------------
+# observations_file — file existence check + retry behavior
+# ---------------------------------------------------------------------------
+
+
+class TestObservationsFileCheck:
+    """The LLM is instructed to pass observations_file=<path>. If it invents a
+    path that doesn't exist, the tool must raise ToolException with retry-
+    friendly text — _wrap_with_summarizer in agent.py turns that into a
+    visible retry prompt for the LLM.
+    """
+
+    def _write_obs_file(self, tmp_path, payload):
+        f = tmp_path / "observations.json"
+        f.write_text(json.dumps(payload), encoding="utf-8")
+        return str(f)
+
+    def test_map_with_existing_file_renders(self, tmp_path):
+        path = self._write_obs_file(tmp_path, SAMPLE_OBS)
+        result = create_sightings_map.invoke({"observations_file": path})
+        assert VizBuffer["type"] == "map"
+        assert "2" in result
+
+    def test_chart_with_existing_file_renders(self, tmp_path):
+        path = self._write_obs_file(tmp_path, SAMPLE_OBS)
+        result = create_historical_chart.invoke({"observations_file": path})
+        assert VizBuffer["type"] == "chart"
+        assert "2" in result
+
+    def test_table_with_existing_file_renders(self, tmp_path):
+        path = self._write_obs_file(tmp_path, SAMPLE_OBS)
+        show_observations_table.invoke({"observations_file": path})
+        assert VizBuffer["type"] == "dataframe"
+        assert len(VizBuffer["data"]) == len(SAMPLE_OBS)
+
+    def test_map_missing_file_raises_with_retry_hint(self):
+        bogus = "/tmp/ebird_summaries/observations_99999999_999999_999999.json"
+        with pytest.raises(ToolException) as exc_info:
+            create_sightings_map.invoke({"observations_file": bogus})
+        msg = str(exc_info.value)
+        assert "does not exist" in msg
+        assert "fabricated" in msg.lower() or "eBird" in msg
+
+    def test_chart_missing_file_raises_with_retry_hint(self):
+        bogus = "/tmp/ebird_summaries/observations_does_not_exist.json"
+        with pytest.raises(ToolException, match="does not exist"):
+            create_historical_chart.invoke({"observations_file": bogus})
+
+    def test_table_missing_file_raises_with_retry_hint(self):
+        bogus = "/tmp/ebird_summaries/observations_made_up.json"
+        with pytest.raises(ToolException, match="does not exist"):
+            show_observations_table.invoke({"observations_file": bogus})
+
+    def test_missing_file_error_names_last_known_path(self, tmp_path):
+        """When a real obs file has been written this session, the error must
+        quote it verbatim so the LLM can retry with a concrete value instead
+        of fabricating another timestamp."""
+        from src.utils import state
+        good_path = self._write_obs_file(tmp_path, SAMPLE_OBS)
+        state.set_last_obs_file(good_path)
+        try:
+            bogus = "/tmp/ebird_summaries/observations_99999999_999999_999999.json"
+            with pytest.raises(ToolException) as exc_info:
+                create_sightings_map.invoke({"observations_file": bogus})
+            msg = str(exc_info.value)
+            assert good_path in msg
+            assert "ONLY valid path" in msg
+        finally:
+            state._last_obs_file = None
+
+    def test_file_with_invalid_json_raises(self, tmp_path):
+        f = tmp_path / "bad.json"
+        f.write_text("not json", encoding="utf-8")
+        with pytest.raises(ToolException, match="not valid JSON"):
+            create_sightings_map.invoke({"observations_file": str(f)})
+
+    def test_file_with_non_list_raises(self, tmp_path):
+        f = tmp_path / "obj.json"
+        f.write_text(json.dumps({"foo": "bar"}), encoding="utf-8")
+        with pytest.raises(ToolException, match="JSON array"):
+            create_sightings_map.invoke({"observations_file": str(f)})
+
+    def test_file_with_observations_wrapper_unwrapped(self, tmp_path):
+        """eBird tools may wrap the array in {'_note':..., 'observations':[...]} —
+        the loader must transparently unwrap it."""
+        f = tmp_path / "wrapped.json"
+        f.write_text(
+            json.dumps({"_note": "test", "observations": SAMPLE_OBS}),
+            encoding="utf-8",
+        )
+        result = create_sightings_map.invoke({"observations_file": str(f)})
+        assert VizBuffer["type"] == "map"
+        assert "2" in result
+
+    def test_observations_json_takes_precedence_over_file(self, tmp_path):
+        """When both are provided, the explicit JSON wins."""
+        path = self._write_obs_file(tmp_path, [SAMPLE_OBS[0]])
+        result = create_sightings_map.invoke({
+            "observations_json": json.dumps(SAMPLE_OBS),
+            "observations_file": path,
+        })
+        # Should reflect the 2 records from observations_json, not the 1 in the file
+        assert "2" in result
+
+    def test_missing_file_retried_via_wrapper(self, tmp_path):
+        """The agent wrapper catches ToolException, returns a retry-prompt
+        string, and on a follow-up call with a valid path the tool succeeds —
+        proving the LLM-visible retry loop is intact."""
+        from src.agent import _wrap_with_summarizer, _reset_tool_error_counts
+
+        _reset_tool_error_counts()
+        wrapped = _wrap_with_summarizer(create_sightings_map)
+
+        # First call: fabricated path -> wrapper returns an error string (does
+        # not raise) so the LLM sees it and can retry.
+        bogus = "/tmp/ebird_summaries/observations_fake.json"
+        first = wrapped.invoke({"observations_file": bogus})
+        assert isinstance(first, str)
+        assert "error" in first.lower()
+        assert "retry" in first.lower()
+
+        # Second call: real path -> succeeds.
+        good_path = self._write_obs_file(tmp_path, SAMPLE_OBS)
+        second = wrapped.invoke({"observations_file": good_path})
+        assert "sightings" in second.lower()
+        assert VizBuffer["type"] == "map"
+
+
+# ---------------------------------------------------------------------------
+# Turn guard — viz tools must refuse to render data fetched in a prior turn
+# ---------------------------------------------------------------------------
+
+
+class TestTurnGuard:
+    """Reproduces the QC bug: previous-turn data was leaking into the new
+    turn's map because clear_viz_buffer() did not invalidate the obs cache.
+
+    The guard now requires that an eBird tool ran in the *current* turn
+    before any viz tool's cache fallback is allowed.
+    """
+
+    def _populate_cache(self):
+        """Simulate a successful eBird tool call by writing the obs cache and
+        marking it as current-turn."""
+        from src.utils.state import (
+            set_obs_dataframe,
+            set_last_observations,
+            mark_obs_cache_current,
+        )
+        import pandas as pd
+        set_obs_dataframe(pd.DataFrame(SAMPLE_OBS))
+        set_last_observations(json.dumps(SAMPLE_OBS))
+        mark_obs_cache_current()
+
+    def test_cache_fallback_blocked_when_no_fetch_this_turn(self):
+        """Without any eBird call this turn, cache fallback must raise."""
+        with pytest.raises(ToolException, match="this turn"):
+            create_sightings_map.invoke({})
+
+    def test_chart_cache_fallback_blocked_when_no_fetch_this_turn(self):
+        with pytest.raises(ToolException, match="this turn"):
+            create_historical_chart.invoke({})
+
+    def test_table_cache_fallback_blocked_when_no_fetch_this_turn(self):
+        with pytest.raises(ToolException, match="this turn"):
+            show_observations_table.invoke({})
+
+    def test_cache_fallback_allowed_after_fetch(self):
+        """After mark_obs_cache_current the fallback proceeds normally."""
+        self._populate_cache()
+        result = create_sightings_map.invoke({})
+        assert VizBuffer["type"] == "map"
+        assert "2" in result
+
+    def test_new_turn_invalidates_prior_cache(self):
+        """Reproduces the original bug: data fetched in turn N should not be
+        available to viz tools called in turn N+1."""
+        from src.utils.state import start_new_turn
+        self._populate_cache()
+        # Fallback works in the same turn.
+        create_sightings_map.invoke({})
+        clear_viz_buffer()
+        # Simulate the user typing a follow-up question.
+        start_new_turn()
+        with pytest.raises(ToolException, match="this turn"):
+            create_sightings_map.invoke({})
+
+    def test_observations_json_bypasses_turn_guard(self):
+        """Explicit JSON input must work even when no fetch happened this turn."""
+        result = create_sightings_map.invoke(
+            {"observations_json": json.dumps(SAMPLE_OBS)}
+        )
+        assert VizBuffer["type"] == "map"
+        assert "2" in result
+
+    def test_observations_file_bypasses_turn_guard(self, tmp_path):
+        """Explicit file input must work even when no fetch happened this turn."""
+        f = tmp_path / "obs.json"
+        f.write_text(json.dumps(SAMPLE_OBS), encoding="utf-8")
+        result = create_sightings_map.invoke({"observations_file": str(f)})
+        assert VizBuffer["type"] == "map"
+        assert "2" in result
+
+    def test_turn_guard_error_tells_llm_to_fetch(self):
+        """The error message must coach the LLM toward calling an eBird tool."""
+        with pytest.raises(ToolException) as exc_info:
+            create_sightings_map.invoke({})
+        msg = str(exc_info.value).lower()
+        assert "ebird" in msg
+        assert "fetch" in msg or "call" in msg
+
+    def test_return_obs_marks_cache_current(self):
+        """The real eBird-tool helper must wire the turn guard automatically."""
+        from src.tools.ebird_tools import _return_obs
+        from src.utils.state import obs_cache_is_current_turn
+
+        assert obs_cache_is_current_turn() is False
+        _return_obs(SAMPLE_OBS)
+        assert obs_cache_is_current_turn() is True
+
+
+# ---------------------------------------------------------------------------
+# species_filter — viz tools should plot only the requested subset
+# ---------------------------------------------------------------------------
+
+
+# Three-species fixture mirrors the user-reported QC scenario: cache contains
+# many species but the user asked for a specific subset.
+_THREE_SPECIES = [
+    {
+        "comName": "Bald Eagle",
+        "sciName": "Haliaeetus leucocephalus",
+        "speciesCode": "baleag",
+        "howMany": 2, "lat": 46.81, "lng": -71.21,
+        "obsDt": "2026-04-25 08:00", "locName": "Site A", "locId": "L1",
+    },
+    {
+        "comName": "Osprey",
+        "sciName": "Pandion haliaetus",
+        "speciesCode": "osprey",
+        "howMany": 1, "lat": 46.82, "lng": -71.22,
+        "obsDt": "2026-04-25 09:00", "locName": "Site B", "locId": "L2",
+    },
+    {
+        "comName": "Golden Eagle",
+        "sciName": "Aquila chrysaetos",
+        "speciesCode": "goleag",
+        "howMany": 1, "lat": 46.83, "lng": -71.23,
+        "obsDt": "2026-04-25 10:00", "locName": "Site C", "locId": "L3",
+    },
+    {
+        "comName": "American Robin",
+        "sciName": "Turdus migratorius",
+        "speciesCode": "amerob",
+        "howMany": 12, "lat": 46.84, "lng": -71.24,
+        "obsDt": "2026-04-25 11:00", "locName": "Site D", "locId": "L4",
+    },
+]
+
+
+class TestSpeciesFilter:
+    def test_map_no_filter_renders_all_species(self):
+        result = create_sightings_map.invoke(
+            {"observations_json": json.dumps(_THREE_SPECIES)}
+        )
+        assert "4" in result
+
+    def test_map_star_filter_renders_all_species(self):
+        result = create_sightings_map.invoke(
+            {
+                "observations_json": json.dumps(_THREE_SPECIES),
+                "species_filter": ["*"],
+            }
+        )
+        assert "4" in result
+
+    def test_map_filter_by_common_name(self):
+        result = create_sightings_map.invoke(
+            {
+                "observations_json": json.dumps(_THREE_SPECIES),
+                "species_filter": ["Bald Eagle", "Osprey"],
+            }
+        )
+        assert "2" in result
+        assert VizBuffer["type"] == "map"
+        rendered = {row["Species"] for row in VizBuffer["table"]}
+        assert rendered == {"Bald Eagle", "Osprey"}
+
+    def test_map_filter_by_species_code(self):
+        result = create_sightings_map.invoke(
+            {
+                "observations_json": json.dumps(_THREE_SPECIES),
+                "species_filter": ["baleag", "osprey", "goleag"],
+            }
+        )
+        assert "3" in result
+        rendered = {row["Species"] for row in VizBuffer["table"]}
+        assert rendered == {"Bald Eagle", "Osprey", "Golden Eagle"}
+
+    def test_map_filter_is_case_insensitive(self):
+        result = create_sightings_map.invoke(
+            {
+                "observations_json": json.dumps(_THREE_SPECIES),
+                "species_filter": ["BALD EAGLE", "OsPrEy"],
+            }
+        )
+        assert "2" in result
+
+    def test_map_filter_mix_codes_and_names(self):
+        result = create_sightings_map.invoke(
+            {
+                "observations_json": json.dumps(_THREE_SPECIES),
+                "species_filter": ["baleag", "Osprey"],
+            }
+        )
+        assert "2" in result
+
+    def test_map_filter_no_match_raises(self):
+        """Empty filter result is a bug signal — must surface, not silently render."""
+        with pytest.raises(ToolException, match="matched no records"):
+            create_sightings_map.invoke(
+                {
+                    "observations_json": json.dumps(_THREE_SPECIES),
+                    "species_filter": ["does-not-exist"],
+                }
+            )
+
+    def test_chart_filter_subsets_records(self):
+        result = create_historical_chart.invoke(
+            {
+                "observations_json": json.dumps(_THREE_SPECIES),
+                "chart_type": "bar",
+                "species_filter": ["Bald Eagle", "Osprey"],
+            }
+        )
+        # Confirmation string includes the post-filter count.
+        assert "2" in result
+        assert VizBuffer["type"] == "chart"
+
+    def test_chart_filter_star_keeps_all(self):
+        result = create_historical_chart.invoke(
+            {
+                "observations_json": json.dumps(_THREE_SPECIES),
+                "chart_type": "bar",
+                "species_filter": ["*"],
+            }
+        )
+        assert "4" in result
+
+    def test_table_filter_subsets_rows(self):
+        result = show_observations_table.invoke(
+            {
+                "observations_json": json.dumps(_THREE_SPECIES),
+                "species_filter": ["Bald Eagle"],
+            }
+        )
+        assert "1" in result
+        assert len(VizBuffer["data"]) == 1
+        assert VizBuffer["data"][0]["Species"] == "Bald Eagle"
+
+    def test_table_filter_star_keeps_all(self):
+        show_observations_table.invoke(
+            {
+                "observations_json": json.dumps(_THREE_SPECIES),
+                "species_filter": ["*"],
+            }
+        )
+        assert len(VizBuffer["data"]) == 4
+
+    def test_filter_works_with_cache_fallback(self):
+        """Filter must apply when records are loaded from the session cache."""
+        from src.utils.state import set_obs_dataframe, mark_obs_cache_current
+        set_obs_dataframe(pd.DataFrame(_THREE_SPECIES))
+        mark_obs_cache_current()
+        result = create_sightings_map.invoke(
+            {"species_filter": ["Bald Eagle", "Osprey", "Golden Eagle"]}
+        )
+        assert "3" in result
+        rendered = {row["Species"] for row in VizBuffer["table"]}
+        assert rendered == {"Bald Eagle", "Osprey", "Golden Eagle"}
+
+    def test_filter_error_lists_available_species(self):
+        with pytest.raises(ToolException) as exc_info:
+            create_sightings_map.invoke(
+                {
+                    "observations_json": json.dumps(_THREE_SPECIES),
+                    "species_filter": ["Snowy Owl"],
+                }
+            )
+        msg = str(exc_info.value)
+        # Must surface what IS available so the LLM can self-correct.
+        assert "Bald Eagle" in msg or "baleag" in msg.lower()

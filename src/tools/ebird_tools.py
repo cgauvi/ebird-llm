@@ -31,6 +31,7 @@ from src.utils.state import (
     append_obs_history,
     get_last_search_params,
     region_label_from_params,
+    mark_obs_cache_current,
 )
 from src.utils.summarizer import SUMMARIES_DIR
 
@@ -69,6 +70,10 @@ def _return_obs(records: list, note: str | None = None) -> str:
         json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     set_last_obs_file(str(obs_file))
+
+    # Tag this fetch so viz tools' cache-fallback path knows the data is from
+    # the current turn — guards against rendering leftovers from a prior turn.
+    mark_obs_cache_current()
 
     # Build compact summary — all the LLM needs to decide what to do next
     n = len(records)
@@ -110,9 +115,11 @@ def _return_obs(records: list, note: str | None = None) -> str:
                         "and may not reflect current conditions. Do not present them as 'recent'."
                     )
 
+    parts.append(f'JSON file: {obs_file}.')
     parts.append(
-        'Call show_observations_table to display the data as a table, '
-        'or create_sightings_map or create_historical_chart to visualize.'
+        'Call show_observations_table, create_sightings_map, or '
+        f'create_historical_chart with observations_file="{obs_file}" to '
+        'display or visualize this data — never invent a file path.'
     )
     return " ".join(parts)
 
