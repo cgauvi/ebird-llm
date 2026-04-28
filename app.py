@@ -179,6 +179,9 @@ if auth_configured() and not st.session_state.authenticated:
 
 def _git_version() -> str:
     """Return the current git tag or short commit hash, e.g. 'v1.2.3' or 'a1b2c3d'."""
+    baked = os.environ.get("BUILD_VERSION", "").strip()
+    if baked:
+        return baked
     import subprocess
     try:
         return subprocess.check_output(
