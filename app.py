@@ -138,12 +138,6 @@ if auth_configured() and not st.session_state.authenticated:
                     st.session_state.authenticated = True
                     st.session_state.user_email = result["email"]
                     st.session_state.session_id = str(uuid.uuid4())
-                    # Track session start
-                    try:
-                        from src.utils.usage_tracker import increment_session
-                        increment_session(result["email"])
-                    except Exception:
-                        pass
                     st.rerun()
                 else:
                     st.error(result["error"])

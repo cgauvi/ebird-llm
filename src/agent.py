@@ -799,6 +799,26 @@ def stream_agent(user_input: str, history: list[dict] | None = None):
     logger.info("stream_agent called | input: %s", user_input[:200])
     add_log_entry("INFO", "src.agent", f"User: {user_input}")
 
+    # --- Enforce monthly LLM-call cap before invoking the agent ---
+    try:
+        from src.utils.usage_tracker import increment_llm_call
+        import streamlit as _st
+        _user = getattr(_st.session_state, "user_email", None)
+        if _user:
+            _quota = increment_llm_call(_user)
+            if not _quota["allowed"]:
+                _msg = (
+                    f"You've reached your monthly limit of {_quota['limit']} "
+                    f"LLM requests. The counter resets at the start of next month."
+                )
+                logger.warning("Rate limit blocked %s: %s/%s",
+                               _user, _quota["llm_call_count"], _quota["limit"])
+                add_log_entry("WARNING", "src.agent", _msg)
+                yield {"type": "final", "content": _msg}
+                return
+    except Exception:
+        logger.debug("LLM call rate limiting skipped (tracker not configured)")
+
     def _stream_invoke():
         return list(
             agent.stream(
