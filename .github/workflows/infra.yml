@@ -10,10 +10,14 @@ on:
         options: [dev, prod]
   push:
     branches: ["master", "main", "develop"]
-    paths: ["infra/**"]
+    paths:
+      - "infra/**"
+      - "!infra/shared/**"
   pull_request:
     branches: ["master", "main", "develop"]
-    paths: ["infra/**"]
+    paths:
+      - "infra/**"
+      - "!infra/shared/**"
 
 # One Terraform operation per environment at a time.
 # cancel-in-progress: false ensures a running apply is never interrupted.

@@ -60,12 +60,6 @@ variable "streamlit_port" {
   default     = 8501
 }
 
-variable "vpc_cidr" {
-  description = "CIDR block for the VPC (must not overlap between environments in the same account)"
-  type        = string
-  default     = "10.0.0.0/16"
-}
-
 variable "enable_spot" {
   description = "If true, prefer FARGATE_SPOT (with FARGATE fallback) for ECS tasks. Cheaper but interruptible."
   type        = bool
@@ -95,9 +89,19 @@ variable "scale_up_cron" {
 # ---------------------------------------------------------------------------
 
 variable "certificate_arn" {
-  description = "ARN of the ACM certificate to attach to the HTTPS listener (must be in the same region as the ALB). Injected from the CERTIFICATE_ARN GitHub secret in CI."
+  description = "ARN of the ACM certificate. Unused in this per-env stack — the HTTPS listener and certificate are owned by the shared stack — but kept declared so existing CI invocations that pass -var certificate_arn=... continue to work without modification."
   type        = string
   sensitive   = true
+  default     = ""
+}
+
+# ---------------------------------------------------------------------------
+# Hostname (per-env)
+# ---------------------------------------------------------------------------
+
+variable "app_hostname" {
+  description = "Public hostname for this environment. Becomes the host_header condition on the shared ALB's HTTPS listener; must be covered by certificate_arn and CNAMEd to the shared ALB DNS name."
+  type        = string
 }
 
 

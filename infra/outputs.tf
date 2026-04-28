@@ -1,6 +1,11 @@
 output "app_url" {
-  description = "Public URL of the Streamlit app"
-  value       = "${var.environment == "prod" ? "https" : "http"}://${aws_lb.app.dns_name}"
+  description = "Public URL of the Streamlit app (resolves once the hostname's CNAME is pointed at shared_alb_dns_name)"
+  value       = "https://${var.app_hostname}"
+}
+
+output "shared_alb_dns_name" {
+  description = "DNS name of the shared ALB. Create a CNAME record at var.app_hostname pointing here."
+  value       = data.terraform_remote_state.shared.outputs.alb_dns_name
 }
 
 output "ecr_repository_url" {

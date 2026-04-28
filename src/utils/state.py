@@ -138,3 +138,51 @@ def set_last_search_params(params: dict) -> None:
     """Persist the parameters (region, date, coordinates, species, days_back) from the last query."""
     global _last_search_params
     _last_search_params = params
+
+
+# ---------------------------------------------------------------------------
+# Observations history — keeps recent fetches keyed by region label so the
+# chart tool can render multi-region comparisons on a single figure.
+# ---------------------------------------------------------------------------
+
+_MAX_OBS_HISTORY = 10
+_obs_history: list[dict] = []  # list of {"region": str, "records": list[dict]}
+
+
+def append_obs_history(records: list[dict], region_label: str) -> None:
+    """Add (or replace) the observation set for *region_label* in the history.
+
+    Re-running a query for the same region replaces its prior entry so the
+    history stays a clean per-region snapshot. Capped at _MAX_OBS_HISTORY.
+    """
+    global _obs_history
+    if not records or not region_label:
+        return
+    _obs_history = [e for e in _obs_history if e["region"] != region_label]
+    _obs_history.append({"region": region_label, "records": records})
+    if len(_obs_history) > _MAX_OBS_HISTORY:
+        _obs_history = _obs_history[-_MAX_OBS_HISTORY:]
+
+
+def get_obs_history() -> list[dict]:
+    """Return the list of region-tagged observation sets accumulated this session."""
+    return _obs_history
+
+
+def clear_obs_history() -> None:
+    """Reset the per-region observation history (e.g. on New Conversation)."""
+    global _obs_history
+    _obs_history = []
+
+
+def region_label_from_params(params: "dict | None") -> str:
+    """Derive a stable region label from search params for history tagging."""
+    if not params:
+        return "default"
+    code = params.get("region_code")
+    if code:
+        return str(code)
+    lat, lng = params.get("lat"), params.get("lng")
+    if lat is not None and lng is not None:
+        return f"{float(lat):.3f},{float(lng):.3f}"
+    return str(params.get("query_type") or "default")

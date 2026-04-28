@@ -107,17 +107,17 @@ resource "aws_ecs_task_definition" "app" {
 
       # Secrets injected from SSM at container startup (never in plain text in task def)
       secrets = [
-        { name = "EBIRD_API_KEY",          valueFrom = aws_ssm_parameter.ebird_api_key.arn },
-        { name = "HUGGINGFACE_API_TOKEN",   valueFrom = aws_ssm_parameter.hf_api_token.arn }
+        { name = "EBIRD_API_KEY", valueFrom = aws_ssm_parameter.ebird_api_key.arn },
+        { name = "HUGGINGFACE_API_TOKEN", valueFrom = aws_ssm_parameter.hf_api_token.arn }
       ]
 
       # Non-secret configuration from SSM
       environment = [
-        { name = "COGNITO_USER_POOL_ID",  value = aws_cognito_user_pool.main.id },
-        { name = "COGNITO_CLIENT_ID",      value = aws_cognito_user_pool_client.streamlit.id },
-        { name = "DYNAMODB_TABLE_PREFIX",  value = local.prefix },
-        { name = "AWS_REGION",             value = var.aws_region },
-        { name = "APP_ENV",                value = var.environment },
+        { name = "COGNITO_USER_POOL_ID", value = aws_cognito_user_pool.main.id },
+        { name = "COGNITO_CLIENT_ID", value = aws_cognito_user_pool_client.streamlit.id },
+        { name = "DYNAMODB_TABLE_PREFIX", value = local.prefix },
+        { name = "AWS_REGION", value = var.aws_region },
+        { name = "APP_ENV", value = var.environment },
       ]
 
       logConfiguration = {
@@ -171,7 +171,7 @@ resource "aws_ecs_service" "app" {
   }
 
   network_configuration {
-    subnets         = aws_subnet.public[*].id
+    subnets         = data.terraform_remote_state.shared.outputs.public_subnet_ids
     security_groups = [aws_security_group.ecs.id]
     # assign_public_ip allows ECR/HuggingFace API egress without a NAT gateway
     assign_public_ip = true
@@ -183,7 +183,9 @@ resource "aws_ecs_service" "app" {
     container_port   = var.streamlit_port
   }
 
-  depends_on = [aws_lb_listener.http]
+  # The listener rule must exist before the service starts registering targets,
+  # otherwise the ALB has no rule pointing at this target group.
+  depends_on = [aws_lb_listener_rule.app]
 }
 
 # ---------------------------------------------------------------------------

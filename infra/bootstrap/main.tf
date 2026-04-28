@@ -229,9 +229,9 @@ data "aws_iam_policy_document" "github_deploy" {
 
   # --- ECR (push production image) ---
   statement {
-    sid     = "ECRAuth"
-    effect  = "Allow"
-    actions = ["ecr:GetAuthorizationToken"]
+    sid       = "ECRAuth"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
   }
 
@@ -331,7 +331,10 @@ data "aws_iam_policy_document" "github_deploy" {
     resources = ["*"]
   }
 
-  # --- ELB (alb.tf) ---
+  # --- ELB (shared/alb.tf + per-env alb.tf) ---
+  # CreateRule/DeleteRule/ModifyRule/SetRulePriorities are needed because
+  # per-env stacks attach aws_lb_listener_rule resources onto the shared
+  # listener.
   statement {
     sid    = "ELB"
     effect = "Allow"
@@ -339,22 +342,27 @@ data "aws_iam_policy_document" "github_deploy" {
       "elasticloadbalancing:AddTags",
       "elasticloadbalancing:CreateListener",
       "elasticloadbalancing:CreateLoadBalancer",
+      "elasticloadbalancing:CreateRule",
       "elasticloadbalancing:CreateTargetGroup",
       "elasticloadbalancing:DeleteListener",
       "elasticloadbalancing:DeleteLoadBalancer",
+      "elasticloadbalancing:DeleteRule",
       "elasticloadbalancing:DeleteTargetGroup",
       "elasticloadbalancing:DescribeListenerAttributes",
       "elasticloadbalancing:DescribeListeners",
       "elasticloadbalancing:DescribeLoadBalancerAttributes",
       "elasticloadbalancing:DescribeLoadBalancers",
+      "elasticloadbalancing:DescribeRules",
       "elasticloadbalancing:DescribeTags",
       "elasticloadbalancing:DescribeTargetGroupAttributes",
       "elasticloadbalancing:DescribeTargetGroups",
       "elasticloadbalancing:ModifyListener",
       "elasticloadbalancing:ModifyLoadBalancerAttributes",
+      "elasticloadbalancing:ModifyRule",
       "elasticloadbalancing:ModifyTargetGroup",
       "elasticloadbalancing:ModifyTargetGroupAttributes",
       "elasticloadbalancing:RemoveTags",
+      "elasticloadbalancing:SetRulePriorities",
       "elasticloadbalancing:SetSecurityGroups",
     ]
     resources = ["*"]
@@ -386,8 +394,8 @@ data "aws_iam_policy_document" "github_deploy" {
   }
 
   statement {
-    sid     = "IAMOIDC"
-    effect  = "Allow"
+    sid    = "IAMOIDC"
+    effect = "Allow"
     actions = [
       "iam:GetOpenIDConnectProvider",
       "iam:ListOpenIDConnectProviders",
@@ -424,9 +432,9 @@ data "aws_iam_policy_document" "github_deploy" {
   }
 
   statement {
-    sid     = "SSMDescribeParameters"
-    effect  = "Allow"
-    actions = ["ssm:DescribeParameters"]
+    sid       = "SSMDescribeParameters"
+    effect    = "Allow"
+    actions   = ["ssm:DescribeParameters"]
     resources = ["*"]
   }
 

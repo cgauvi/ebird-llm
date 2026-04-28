@@ -70,8 +70,8 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_managed" {
 # Inline policy: allow the execution role to read the two SSM secrets
 data "aws_iam_policy_document" "ssm_read" {
   statement {
-    sid    = "ReadSSMSecrets"
-    effect = "Allow"
+    sid     = "ReadSSMSecrets"
+    effect  = "Allow"
     actions = ["ssm:GetParameters"]
     resources = [
       aws_ssm_parameter.ebird_api_key.arn,
