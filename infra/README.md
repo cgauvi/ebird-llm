@@ -425,7 +425,9 @@ automatically download the pinned provider versions. No extra flags needed.
 
 **Pause the app (stop billing for compute):**
 ```bash
+cd infra
 terraform apply -var-file=dev.tfvars -var="desired_count=0"
+terraform apply -var-file=prod.tfvars -var="desired_count=0"
 ```
 
 **Resume:**
@@ -442,39 +444,38 @@ aws logs tail /ecs/ebird-llm-prod --follow --region us-east-2
 
 **Tear down an environment (app infrastructure):**
 
-Requires `AWS_ACCOUNT_ID` exported — see "Manual Deployment" above.
-
-Per-env stacks must be destroyed before the shared stack, otherwise the
-target group / listener rule will dangle on the shared ALB and the
-shared `terraform destroy` will fail to remove the listener.
+Order matters: per-env stacks must be destroyed **before** the shared stack,
+otherwise the per-env target group / listener rule dangles on the shared ALB
+and `make destroy-shared` fails on the in-use listener.
 
 ```bash
-cd infra
+# 1. Per-env (run for each env you want to remove)
+make destroy ENV=dev
+make destroy ENV=prod
 
-# Dev
-terraform init -reconfigure \
-  -backend-config="bucket=ebird-llm-tf-state-${AWS_ACCOUNT_ID}" \
-  -backend-config="key=ebird-llm/dev/terraform.tfstate" \
-  -backend-config="dynamodb_table=ebird-llm-tf-locks" \
-  -backend-config="encrypt=true"
-terraform destroy -var-file=dev.tfvars
-
-# Prod
-terraform init -reconfigure \
-  -backend-config="bucket=ebird-llm-tf-state-${AWS_ACCOUNT_ID}" \
-  -backend-config="key=ebird-llm/prod/terraform.tfstate" \
-  -backend-config="dynamodb_table=ebird-llm-tf-locks" \
-  -backend-config="encrypt=true"
-terraform destroy -var-file=prod.tfvars
-
-# Shared (only after BOTH dev and prod have been destroyed)
+# 2. Shared (only after BOTH per-env stacks are gone)
+export CERTIFICATE_ARN=xxxx   # required: shared cert var has no default
 make destroy-shared
 ```
 
-The ECR repo has `force_delete = true`, so images will not block destroy.
-SSM parameters, Cognito user pools, DynamoDB app tables, the per-env
-target group / listener rule, and (after `destroy-shared`) the ALB and
-VPC all destroy cleanly.
+> **Do I need to delete SSM parameters first? No.** The
+> `lifecycle { ignore_changes = [value] }` block on the API-key parameters
+> ([ecs.tf](ecs.tf)) only suppresses *value drift* during `apply` — it
+> does not block destroy. Parameters you populated manually with
+> `aws ssm put-parameter --overwrite` are removed by Terraform along with
+> the rest of the stack.
+
+Other resources that destroy cleanly without manual prep:
+
+- **ECR repo** — `force_delete = true`, so images don't block destroy.
+- **Cognito user pool** — no `deletion_protection` set; users in the pool
+  are deleted with it.
+- **DynamoDB tables** (`usage`, `llm-calls`, `session-logs`) — no
+  `deletion_protection_enabled`; all rows go with the table.
+- **Per-env target group / listener rule** — removed from the shared ALB
+  by the per-env destroy.
+- **Shared ALB + VPC** — removed by `make destroy-shared` once both
+  per-env stacks are gone.
 
 **Tear down the bootstrap (state bucket, lock table, OIDC provider, deploy role):**
 

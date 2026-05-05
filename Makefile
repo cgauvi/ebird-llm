@@ -39,7 +39,7 @@ TF_VARS     = -var-file="$(ENV).tfvars" \
 
 TF_VARS_SHARED = -var "certificate_arn=$(CERTIFICATE_ARN)"
 
-.PHONY: init plan apply init-shared plan-shared apply-shared destroy-shared
+.PHONY: init plan apply destroy init-shared plan-shared apply-shared destroy-shared
 
 init-shared:
 	$(TF_SHARED) init -reconfigure $(TF_BACKEND_SHARED)
@@ -63,6 +63,16 @@ plan: init
 
 apply:
 	$(TF) apply tfplan && rm -f tfplan
+
+# Destroy a per-env stack. Run BEFORE destroy-shared so the listener rule on
+# the shared ALB is removed first; otherwise the shared destroy fails on the
+# dangling rule. SSM parameters (including ones whose values you populated
+# manually with `aws ssm put-parameter --overwrite`) are removed cleanly —
+# `lifecycle { ignore_changes = [value] }` only suppresses in-place updates
+# during apply, it does not block destroy.
+destroy:
+	$(TF) init -reconfigure $(TF_BACKEND)
+	$(TF) destroy $(TF_VARS)
 
 login:
 	aws ecr get-login-password --region $(AWS_REGION) \
